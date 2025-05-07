@@ -1,0 +1,18 @@
+[package]
+name = "my_spacetime_module"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = ["unstable"]
+unstable = ["spacetimedb/unstable"]
+
+[dependencies]
+spacetimedb = { version = "1.1.1", features = ["unstable"] }
+getrandom = { version = "0.3.2", default-features = false, features = ["wasm_js"] }
+log = "0.4"
+rand = "0.9.1"
+serde = { version = "1.0", features = ["derive"] }
