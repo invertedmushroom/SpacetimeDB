@@ -1,0 +1,9 @@
+[package]
+name = "spacetime_common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+spacetimedb = { version = "1.1.1", features = ["unstable"] }
+rapier3d = "0.25.1"
+thiserror = "2.0"

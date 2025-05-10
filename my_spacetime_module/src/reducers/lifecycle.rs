@@ -1,18 +1,24 @@
-use spacetimedb::{Identity, ReducerContext, Table};
-use crate::tables::player::{Player, PlayerStatus, player};
-use crate::tables::game_item::{GameItem, game_item};
+use spacetimedb::{Identity, ReducerContext, Timestamp, ScheduleAt, Table};
+use crate::tables::player::{Player, PlayerStatus};
+use crate::tables::scheduling::PhysicsTickSchedule;
+use crate::tables::game_item::GameItem;
 use crate::calculate_chunk;
+use crate::physics::spawn_rigid_body;
+use crate::tables::game_item::game_item;
+use crate::tables::scheduling::physics_tick_schedule;
+use crate::tables::player::player;
 
 /**
  * Initialization reducer called when the module is first published.
  * 
  * Initial world state setup
- * This demonstrates how to populate the game world with starter entities
- * that should exist before any players connect.
  */
 #[spacetimedb::reducer(init)]
 pub fn module_init(ctx: &ReducerContext) -> Result<(), String> {
     log::info!("Game module initialized");
+    
+    // Schedule physics ticks to run every 100ms (10 times per second)
+    schedule_physics_tick(ctx, 0, None)?;
     
     // Create some initial game items in the world
     let timestamp = ctx.timestamp;
@@ -34,6 +40,40 @@ pub fn module_init(ctx: &ReducerContext) -> Result<(), String> {
     
     // Insert into database - pass the struct directly, not a reference
     ctx.db.game_item().insert(health_potion);
+
+    Ok(())
+}
+
+/**
+ * Helper function to schedule the next physics tick
+ */
+pub fn schedule_physics_tick(ctx: &ReducerContext, region: u32, last_id: Option<u64>) -> Result<(), String> {
+    // Get the next ID
+    let next_id = if let Some(id) = last_id {
+        id + 1
+    } else {
+        // If we don't have a previous ID, find the max ID and increment
+        let max_id = ctx.db.physics_tick_schedule().iter()
+            .map(|s| s.scheduled_id)
+            .max()
+            .unwrap_or(0);
+        max_id + 1
+    };
+    
+    // Schedule the next tick 100ms in the future
+    let now = ctx.timestamp;
+    let next_time = now.to_micros_since_unix_epoch() + 100_000; // 100ms in microseconds
+    let next_time = Timestamp::from_micros_since_unix_epoch(next_time);
+    
+    // Create the schedule entry
+    let schedule = PhysicsTickSchedule {
+        scheduled_id: next_id,
+        scheduled_at: ScheduleAt::Time(next_time),
+        region,
+    };
+    
+    // Insert the schedule entry
+    ctx.db.physics_tick_schedule().insert(schedule);
     
     Ok(())
 }
@@ -52,7 +92,9 @@ pub fn on_client_connected(ctx: &ReducerContext) -> Result<(), String> {
     log::info!("Client connected: {:?}", client_id);
     
     // Check if player exists
-    if ctx.db.player().iter().find(|p| p.player_id == client_id).is_none() {
+    let existing_player = ctx.db.player().iter().find(|p| p.player_id == client_id);
+    
+    if existing_player.is_none() {
         // Create a new player with default stats
         let new_player = Player {
             player_id: client_id,
@@ -67,19 +109,25 @@ pub fn on_client_connected(ctx: &ReducerContext) -> Result<(), String> {
             last_active: ctx.timestamp,
         };
         
-        // Insert directly on the table - no reference
+        // Insert player
         ctx.db.player().insert(new_player.clone());
         log::info!("Created new player: {}", new_player.username);
-    } else {
+
+        // Spawn physics body for new player
+        spawn_rigid_body(
+            ctx,
+            0u32,
+            new_player.position_x,
+            new_player.position_y,
+            0.0f32,
+            "Sphere(0.5)".to_string(),
+            2u8,
+        )?;
+    } else if let Some(mut player) = existing_player {
         // Update existing player status
-        let mut player = ctx.db.player().iter().find(|p| p.player_id == client_id).unwrap().clone();
         player.status = PlayerStatus::Online;
         player.last_active = ctx.timestamp;
-        
-        // Update player using primary key column
-        ctx.db.player().player_id().update(player.clone());
-        
-        log::info!("Player returned: {}", player.username);
+        ctx.db.player().player_id().update(player);
     }
     
     Ok(())

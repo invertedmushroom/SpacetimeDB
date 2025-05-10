@@ -13,6 +13,10 @@ use crate::game_features::{GameActions, ChunkSubscriptionManager, MoveAndPickupC
 use crate::module_bindings::DbConnection;
 use std::io::Write;
 use phf::phf_map;
+use crate::module_bindings::spawn_rigid_body_reducer::spawn_rigid_body;
+use crate::module_bindings::despawn_rigid_body_reducer::despawn_rigid_body;
+use crate::module_bindings::contact_duration_table::ContactDurationTableAccess;
+use crate::module_bindings::physics_body_table::PhysicsBodyTableAccess;
 
 // Macro to parse typed arguments or print usage and return
 macro_rules! parse_args {
@@ -48,6 +52,12 @@ static COMMAND_MAP: phf::Map<&'static str, fn(&mut GameContext, &[&str])> = phf_
     "aoe" => cmd_aoe,
     "i"   => cmd_inventory,
     "n"   => cmd_nearby,
+    "fire"=> cmd_fire_projectile,
+    "spawn" => cmd_spawn_object,
+    "test" => cmd_physics_test,
+    "contacts" => cmd_show_contacts,
+    "bodies" => cmd_show_physics_bodies,
+    "despawn" => cmd_despawn,
 };
 
 /// Holds mutable game context for command handlers
@@ -145,6 +155,312 @@ fn cmd_nearby(ctx: &mut GameContext, _parts: &[&str]) {
     println!();
 }
 
+fn cmd_fire_projectile(ctx: &mut GameContext, parts: &[&str]) {
+    // Parse direction and speed
+    if parts.len() < 1 {
+        println!("Usage: fire <angle_degrees> [speed=50]");
+        return;
+    }
+    
+    let angle: f32 = parts[0].parse().unwrap_or_else(|_| {
+        println!("Invalid angle, using 0");
+        0.0
+    });
+    let speed: f32 = if parts.len() > 1 { 
+        parts[1].parse().unwrap_or_else(|_| {
+            println!("Invalid speed, using default 50");
+            50.0
+        })
+    } else { 50.0 };
+    
+    // Convert angle to radians
+    //let angle_rad = angle * std::f32::consts::PI / 180.0;
+    
+    // Current position
+    let (x, y) = ctx.current_position;
+    let z = 1.0; // Height above ground
+    
+    // Calculate velocity components
+    //let vel_x = speed * angle_rad.cos();
+    //let vel_z = speed * angle_rad.sin();
+    
+    let conn = ctx.chunk_mgr.get_connection();
+    
+    // Spawn a projectile (rigid body type 10)
+    match conn.reducers.spawn_rigid_body(
+        //ctx.player_id,  // entity_id (owner, but will be updated in user_data)
+        0,              // region
+        x,              // x position
+        z,              // y position (height)
+        y,              // z position
+        "Sphere(0.5)".to_string(), // small projectile
+        10,             // PROJECTILE_BODY_TYPE
+    ) {
+        Ok(_) => println!("Projectile fired at angle {} degrees, speed {}", angle, speed),
+        Err(e) => println!("Failed to fire projectile: {}", e),
+    }
+}
+
+fn cmd_spawn_object(ctx: &mut GameContext, parts: &[&str]) {
+    // Parse arguments: shape, body_type
+    if parts.len() < 2 {
+        println!("Usage: spawn <shape> <body_type>");
+        println!("  shape: Sphere(radius) or Box(x,y,z)");
+        println!("  body_type: 0=static, 1=dynamic, 2=kinematic, 10=projectile, 20=player");
+        return;
+    }
+    
+    let shape = parts[0].to_string();
+    let body_type: u8 = parts[1].parse().unwrap_or(1);
+    
+    // Current position
+    let (x, y) = ctx.current_position;
+    let z = 1.0;  // Height above ground
+    
+    let conn = ctx.chunk_mgr.get_connection();
+    
+    // Spawn a rigid body with requested parameters
+    match conn.reducers.spawn_rigid_body(
+        //ctx.player_id,  // entity_id (owner)
+        0,              // region
+        x,              // x position
+        z,              // y position (height)
+        y,              // z position
+        shape,          // shape descriptor
+        body_type,      // body type
+    ) {
+        Ok(_) => println!("Object spawned at ({}, {}, {})", x, z, y),
+        Err(e) => println!("Failed to spawn object: {}", e),
+    }
+}
+
+fn cmd_physics_test(ctx: &mut GameContext, parts: &[&str]) {
+    if parts.is_empty() {
+        println!("Usage: test <scenario>");
+        println!("Available scenarios:");
+        println!("  projectile - Test projectile hitting player");
+        println!("  contact - Test contact duration recording");
+        println!("  sensor - Test sensor triggers");
+        return;
+    }
+    
+    match parts[0] {
+        "projectile" => test_projectile_scenario(ctx),
+        "contact" => test_contact_duration_scenario(ctx),
+        "sensor" => test_sensor_scenario(ctx),
+        _ => println!("Unknown scenario: {}", parts[0]),
+    }
+}
+
+fn test_projectile_scenario(ctx: &mut GameContext) {
+    println!("Running projectile test scenario...");
+    let conn = ctx.chunk_mgr.get_connection();
+    let (x, y) = ctx.current_position;
+    
+    // 1. Create a player target at a distance
+    println!("1. Spawning player target at ({}, {})", x + 10.0, y);
+    match conn.reducers.spawn_rigid_body(
+        //Identity::from_hex("target00000000000000000000000000000000").unwrap_or_default(),
+        0,              // region
+        x + 10.0,       // 10 units in front
+        1.0,            // At player height
+        y,              // y position
+        "Sphere(1.0)".to_string(),
+        20,             // PLAYER_BODY_TYPE
+    ) {
+        Ok(_) => println!("Target spawned successfully"),
+        Err(e) => println!("Failed to spawn target: {}", e),
+    };
+    
+    // 2. Fire projectile at the target after a brief delay
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    println!("2. Firing projectile at target");
+    match conn.reducers.spawn_rigid_body(
+        //ctx.player_id,  // entity_id (owner)
+        0,              // region
+        x,              // x position
+        1.0,            // y position (height)
+        y,              // z position
+        "Sphere(0.5)".to_string(),
+        10,             // PROJECTILE_BODY_TYPE
+    ) {
+        Ok(_) => println!("Projectile fired successfully"),
+        Err(e) => println!("Failed to fire projectile: {}", e),
+    };
+    
+    println!("Test initiated. Projectile should hit target and cause damage.");
+    println!("Note: Check server logs for collision events.");
+}
+
+fn test_contact_duration_scenario(ctx: &mut GameContext) {
+    println!("Running contact duration test scenario...");
+    let conn = ctx.chunk_mgr.get_connection();
+    let (x, y) = ctx.current_position;
+    
+    // 1. Create a static body at current position
+    println!("1. Spawning static object at ({}, {})", x, y);
+    let _ = conn.reducers.spawn_rigid_body(
+        //ctx.player_id,
+        0,
+        x,
+        0.5,       // Half-height above ground
+        y,
+        "Sphere(2.0)".to_string(),
+        0,         // STATIC_BODY_TYPE
+    );
+    
+    // 2. Create a dynamic body just above it that will fall and make contact
+    println!("2. Spawning dynamic object above it");
+    let _ = conn.reducers.spawn_rigid_body(
+        //ctx.player_id,
+        0,
+        x,
+        5.0,       // Higher up to fall
+        y,
+        "Sphere(1.0)".to_string(),
+        1,         // DYNAMIC_BODY_TYPE
+    );
+    
+    println!("Test initiated. Objects should make contact and duration should be recorded.");
+    println!("Check contact_duration table after a few seconds.");
+}
+
+fn test_sensor_scenario(ctx: &mut GameContext) {
+    println!("Running sensor test scenario...");
+    let conn = ctx.chunk_mgr.get_connection();
+    let (x, y) = ctx.current_position;
+    
+    // 1. Create a sensor zone at current position
+    println!("1. Spawning sensor at ({}, {})", x, y);
+    match conn.reducers.spawn_rigid_body(
+        //Identity::from_hex("sensor00000000000000000000000000000000").unwrap_or_default(),
+        0,              // region
+        x,              // x position
+        1.0,            // y position (height) 
+        y,              // z position
+        "Sphere(3.0)Sensor".to_string(),  // Add "Sensor" suffix to make it a sensor
+        0,              // STATIC_BODY_TYPE
+    ) {
+        Ok(_) => println!("Sensor spawned successfully"),
+        Err(e) => println!("Failed to spawn sensor: {}", e),
+    };
+    
+    // 2. Create a player body that will move through it
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    println!("2. Spawning player body to enter sensor");
+    match conn.reducers.spawn_rigid_body(
+        //Identity::from_hex("dynamic0000000000000000000000000000000").unwrap_or_default(),
+        0,              // region
+        x - 10.0,       // Start outside sensor
+        1.0,            // y position (height)
+        y,              // z position
+        "Sphere(1.0)".to_string(),
+        20,             // PLAYER_BODY_TYPE
+    ) {
+        Ok(_) => println!("Player body spawned successfully"),
+        Err(e) => println!("Failed to spawn player body: {}", e),
+    };
+    
+    println!("Test initiated. Move the spawned player body into the sensor zone.");
+    println!("Check server logs for sensor trigger events.");
+}
+
+fn cmd_show_contacts(ctx: &mut GameContext, _parts: &[&str]) {
+    let conn = ctx.chunk_mgr.get_connection();
+    
+    println!("\nActive Contact Durations:");
+    println!("------------------------");
+    
+    // Get contact durations
+    let contacts: Vec<_> = conn.db.contact_duration().iter().collect();
+    
+    if contacts.is_empty() {
+        println!("No contact records found.");
+    } else {
+        println!("ID  | Entity1                | Entity2                | Duration (ms)");
+        println!("----|------------------------|------------------------|-------------");
+        
+        for contact in contacts {
+            // Convert microseconds to milliseconds for display
+            let duration_ms = contact.duration_micros as f64 / 1000.0;
+            // Format entity IDs by their last 8 hex digits
+            let h1 = contact.entity_1.to_hex().to_string();
+            let e1 = &h1[h1.len().saturating_sub(8)..];
+            let h2 = contact.entity_2.to_hex().to_string();
+            let e2 = &h2[h2.len().saturating_sub(8)..];
+            
+            println!("{:3} | {:24} | {:24} | {:9.1}", 
+                     contact.id, e1, e2, duration_ms);
+        }
+    }
+    println!();
+}
+
+fn cmd_show_physics_bodies(ctx: &mut GameContext, _parts: &[&str]) {
+    let conn = ctx.chunk_mgr.get_connection();
+    
+    println!("\nPhysics Bodies:");
+    println!("---------------");
+    
+    // Get physics bodies
+    let bodies: Vec<_> = conn.db.physics_body().iter()
+        .collect();
+    
+    if bodies.is_empty() {
+        println!("No physics bodies found.");
+    } else {
+        println!("Entity ID         | Type | Shape             | Position");
+        println!("------------------|------|-------------------|------------------");
+        
+        for body in bodies {
+            // Show full entity ID so users can copy/paste for despawn
+            let entity_id = body.entity_id.to_hex();
+            
+            // Get type name
+            let type_name = match body.body_type {
+                0 => "Static",
+                1 => "Dynamic",
+                2 => "Kinematic",
+                10 => "Projectile",
+                20 => "Player",
+                _ => "Unknown",
+            };
+            
+            println!("{} | {:4} | {:17} | ({:.1}, {:.1}, {:.1})",
+                     entity_id, type_name, body.collider_shape,
+                     body.pos_x, body.pos_y, body.pos_z);
+        }
+    }
+    println!();
+}
+
+fn cmd_despawn(ctx: &mut GameContext, parts: &[&str]) {
+    // Usage: despawn <entity_id_hex> [region]
+    if parts.len() < 1 {
+        println!("Usage: despawn <entity_id_hex> [region]");
+        return;
+    }
+    // Allow full hex or 8-digit suffix: match by suffix if shorter
+    let input = parts[0];
+    // Try full-hex parse first
+    let mut entity_id = spacetimedb_sdk::Identity::from_hex(input).unwrap_or_default();
+    if entity_id == spacetimedb_sdk::Identity::default() && input.len() <= 8 {
+        // match suffix
+        if let Some(mat) = ctx.chunk_mgr.get_connection().db.physics_body().iter()
+            .find(|b| b.entity_id.to_hex().ends_with(input))
+        {
+            entity_id = mat.entity_id.clone();
+        }
+    }
+    // Parse optional region (default 0)
+    let region: u32 = if parts.len() > 1 { parts[1].parse().unwrap_or(0) } else { 0 };
+    let conn = ctx.chunk_mgr.get_connection();
+    match conn.reducers.despawn_rigid_body(entity_id, region) {
+        Ok(_) => println!("Despawned entity {} in region {}", input, region),
+        Err(e) => println!("Failed to despawn {}: {}", input, e),
+    }
+}
+
 fn main() {
     // Create connection to SpacetimeDB server
     let conn = client::create_connection();
@@ -171,14 +487,23 @@ fn main() {
     // Initialize chunk subscription manager with our connection
     let mut chunk_mgr = ChunkSubscriptionManager::new(conn);
     println!("Chunk subscription manager initialized.");
-    
+
     // Subscribe to player's inventory
     chunk_mgr.subscribe_to_inventory(player_id);
-    
+
     // Initial subscription based on starting position
     chunk_mgr.update_subscription_for_position(current_position.0, current_position.1);
     println!("Initial position: ({}, {})", current_position.0, current_position.1);
-    
+
+    // Subscribe to physics_body and contact_duration tables using chunk_mgr's connection
+    let physics_conn = chunk_mgr.get_connection();
+    let _physics_sub = physics_conn.subscription_builder()
+        .on_error(|_ctx, err| eprintln!("Subscription error: {}", err))
+        .subscribe(vec![
+            "SELECT * FROM physics_body".to_string(),
+            "SELECT * FROM contact_duration".to_string(),
+        ]);
+
     // Build game context
     let context = GameContext { chunk_mgr, current_position, player_id };
     let mut ctx = context;

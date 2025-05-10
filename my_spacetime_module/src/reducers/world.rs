@@ -61,14 +61,18 @@ pub fn pickup_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
         if !item.is_dropped {
             return Err("Item is not available for pickup".to_string());
         }
-        
-        // Check if player is near the item (within 10 units)
+        // Quick chunk-based filter: only attempt pickup if player and item share the same chunk
+        let player = ctx.db.player().iter().find(|p| p.player_id == player_id).unwrap();
+        if item.chunk_x != Some(player.chunk_x) || item.chunk_y != Some(player.chunk_y) {
+            return Err("Item is not in same chunk".to_string());
+        }
+        // Check if player is near the item (within 2 units)
         let player = ctx.db.player().iter().find(|p| p.player_id == player_id).unwrap();
         if let (Some(item_x), Some(item_y)) = (item.position_x, item.position_y) {
             let distance = ((player.position_x - item_x).powi(2) + 
                             (player.position_y - item_y).powi(2)).sqrt();
             
-            if distance > 10.0 {
+            if distance > 2.0 {
                 return Err("Item is too far away".to_string());
             }
         } else {

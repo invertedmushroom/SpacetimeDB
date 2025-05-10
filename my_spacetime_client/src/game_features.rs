@@ -22,6 +22,9 @@ use crate::module_bindings::{Player, GameItem};
 use std::time::Duration;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use spacetimedb_sdk::SubscriptionHandle;  // bring unsubscribe into scope
+//use spacetime_common::types::calculate_chunk;  // use local for now when using spacetime_common there is error at Compile time: error: linking with `link.exe` failed: exit code: 1120
+
 
 /// Domain-specific error for game operations
 #[derive(Debug, PartialEq)]
@@ -391,26 +394,53 @@ impl ChunkSubscriptionManager {
         manager
     }
     
-    /// Update subscription based on player position (no-op for subscription)
-    pub fn update_subscription_for_position(&mut self, x: f32, y: f32) {
-        // Update current chunk; state remains managed by persistent subscription
-        let chunk_x = ChunkSubscriptionManager::calculate_chunk(x);
-        let chunk_y = ChunkSubscriptionManager::calculate_chunk(y);
-        self.current_chunk = Some((chunk_x, chunk_y));
+    /// Subscribe to physics bodies in the given chunk (region=0)
+    pub fn subscribe_to_chunk(&mut self, cx: i32, cy: i32) {
+        // Unsubscribe previous
+        if let Some(handle) = self.subscription_handle.take() {
+            if let Err(e) = handle.unsubscribe_then(Box::new(|_| {})) {
+                log::warn!("Failed to unsubscribe from previous chunk subscription: {}", e);
+            }
+        }
+        let region = 0u32; // single region for now
+        let sql = format!(
+            "SELECT * FROM physics_body WHERE region = {} AND chunk_x = {} AND chunk_y = {}",
+            region, cx, cy
+        );
+        let handle = self.conn
+            .subscription_builder()
+            .on_error(|_ctx, err| log::warn!("physics subscription error: {}", err))
+            .subscribe(vec![sql]);
+        self.subscription_handle = Some(handle);
+        self.current_chunk = Some((cx, cy));
     }
-    
+
     /// Subscribe to player's inventory
     pub fn subscribe_to_inventory(&mut self, player_id: Identity) {
         let query = format!(
             "SELECT * FROM game_item WHERE owner_id = '{}'",
             player_id
         );
-        
-        self.conn.subscription_builder()
-            .on_error(|_ctx, err| log::info!("Inventory subscription error: {}", err))
+        let _ = self.conn.subscription_builder()
+            .on_error(|_ctx, err| log::warn!("Inventory subscription error: {}", err))
             .subscribe(vec![query]);
     }
-    
+
+    /// Update subscription based on player position
+    pub fn update_subscription_for_position(&mut self, x: f32, y: f32) {
+        let cx = ChunkSubscriptionManager::calculate_chunk(x);
+        let cy = ChunkSubscriptionManager::calculate_chunk(y);
+        if Some((cx, cy)) != self.current_chunk {
+            // Unsubscribe old and subscribe new
+            if let Some(h) = self.subscription_handle.take() {
+                if let Err(e) = h.unsubscribe_then(Box::new(|_| {})) {
+                    log::warn!("Failed to unsubscribe from previous subscription: {}", e);
+                }
+            }
+            self.subscribe_to_chunk(cx, cy);
+        }
+    }
+
     /// Access the local cached game state
     pub fn get_state(&self) -> Arc<Mutex<GameState>> {
         self.conn.get_state()

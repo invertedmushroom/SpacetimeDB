@@ -8,9 +8,9 @@ use crate::tables::player::player;
 use crate::tables::game_item::game_item;
 
 /// Schema management helper functions for working with the database
-pub struct Schema;
+pub struct QueryUtils;
 
-impl Schema {
+impl QueryUtils {
     /// Retrieve all players, sorted by player_id
     pub fn get_all_players(ctx: &spacetimedb::ReducerContext) -> Vec<Player> {
         ctx.db.player().iter().collect()

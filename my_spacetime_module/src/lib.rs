@@ -9,17 +9,21 @@
  */
 
 // Server module entry point: re-export tables and reducers from submodules
-pub mod constants;
-pub mod schema;
+pub mod query_utils;
+
 pub mod tables {
     pub mod player;
     pub mod game_item;
+    pub mod physics_body;
+    pub mod scheduling;
+    pub mod contact_duration;
 }
 pub mod reducers {
     pub mod combat;
     pub mod lifecycle;
     pub mod world;
 }
+pub mod physics;
 
 // Re-export important types
 pub use spacetimedb::{Identity, ReducerContext, Timestamp, SpacetimeType, Table};
@@ -33,7 +37,7 @@ pub use reducers::lifecycle::{module_init, on_client_connected, on_client_discon
 pub use reducers::world::{move_player, pickup_item, drop_item};
 pub use reducers::combat::{combat_melee, combat_aoe};
 
-pub use constants::calculate_chunk;
+pub use spacetime_common::types::calculate_chunk;
 
 // Additional utility modules
 pub mod rls;

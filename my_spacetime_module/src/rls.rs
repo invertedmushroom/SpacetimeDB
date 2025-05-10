@@ -15,7 +15,7 @@
 // !! Non-inner joins are not supported in RLS rules, and the filter must return rows from only one table. !!
 
 // Remove filters referencing status enum, as enum comparisons are not supported in RLS
-
+#[allow(unused)]
 #[cfg(feature = "unstable")]
 use spacetimedb::{Filter, client_visibility_filter};
 
@@ -39,9 +39,9 @@ use spacetimedb::{Filter, client_visibility_filter};
 //     WHERE owner_id = :sender AND is_dropped = false
 // "#);
 
-#[cfg(feature = "unstable")]
-#[client_visibility_filter]
-const GAME_ITEM_WORLD_FILTER: Filter = Filter::Sql(r#"
-    SELECT * FROM game_item
-    WHERE is_dropped = true
-"#);
+// #[cfg(feature = "unstable")]
+// #[client_visibility_filter]
+// const GAME_ITEM_WORLD_FILTER: Filter = Filter::Sql(r#"
+//     SELECT * FROM game_item
+//     WHERE is_dropped = true
+// "#);
