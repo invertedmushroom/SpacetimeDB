@@ -1,11 +1,14 @@
 use spacetimedb::Identity;
 
-#[spacetimedb::table(name = physics_body, public)]
+#[spacetimedb::table(
+    name = physics_body,
+    index(name = idx_owner, btree(columns = [owner_id]))
+)]
 #[derive(Clone)]
 pub struct PhysicsBody {
     #[primary_key]
     pub entity_id: Identity,
-
+    pub owner_id: Identity,
     #[index(btree)]  // index on region for fast region-based queries
     pub region: u32,
     pub pos_x: f32,

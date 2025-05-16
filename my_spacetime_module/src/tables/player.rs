@@ -25,7 +25,7 @@ pub enum PlayerStatus {
  * 4. Chunk-based spatial partitioning for efficient queries
  */
 #[derive(Clone)]
-#[spacetimedb::table(name = player, public)]
+#[spacetimedb::table(name = player, index(name = idx_chunk, btree(columns = [chunk_x, chunk_y])))]
 pub struct Player {
     #[primary_key]
     pub player_id: Identity,  // Maps directly to client's Identity
@@ -39,4 +39,8 @@ pub struct Player {
     pub score: u32,
     pub status: PlayerStatus, // Current connection/gameplay state
     pub last_active: Timestamp, // Last activity timestamp for timeout logic
+    pub min_x: i32,
+    pub min_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
 }

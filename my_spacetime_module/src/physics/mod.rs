@@ -1,5 +1,7 @@
 use once_cell::sync::Lazy;
 use rapier3d::prelude::*;
+//use nalgebra::UnitQuaternion;
+use rapier3d::na::UnitQuaternion;
 use rapier3d::dynamics::IslandManager;
 use rapier3d::geometry::BroadPhaseMultiSap;
 use std::collections::{HashMap, HashSet};
@@ -14,10 +16,17 @@ use crate::tables::physics_body::physics_body;
 use crate::tables::scheduling::PhysicsTickSchedule;
 use crate::reducers::combat::combat_melee;
 use crate::physics::contact_tracker::{handle_event, remove_entity_contacts, get_active_contact_count};
-use crate::physics::shape::ColliderShape;
-use crate::physics::types::{PhysicsBodyId, ContactPair};
+use crate::spacetime_common::shape::ColliderShape;
+use crate::spacetime_common::types::{PhysicsBodyId, ContactPair};
+use crate::spacetime_common::spatial::calculate_chunk;
+
+use crate::spacetime_common::types;
+use crate::spacetime_common::collision;
+use crate::world::view_updater::{upsert_entity, delete_entity};
+
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
 
 // Unique physics-entity ID counter
 static PHYSICS_ENTITY_COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(1));
@@ -30,11 +39,6 @@ pub const KINEMATIC_BODY_TYPE: u8 = 2;
 // Game-specific body type constants
 pub const PROJECTILE_BODY_TYPE: u8 = 10;
 pub const PLAYER_BODY_TYPE: u8 = 20;
-
-pub use spacetime_common::types;
-pub use spacetime_common::shape;
-pub use spacetime_common::collision;
-use spacetime_common::types::calculate_chunk;
 
 pub mod contact_tracker;
 #[cfg(test)]
@@ -54,9 +58,11 @@ pub struct PhysicsContext {
     pub impulse_joints: ImpulseJointSet,
     pub multibody_joints: MultibodyJointSet,
     pub ccd_solver: CCDSolver,
+    // Track last known transform to minimize DB updates per tick
+    pub last_transforms: HashMap<RigidBodyHandle, (Vector<Real>, UnitQuaternion<Real>)>,
 }
 
-static PHYSICS_CONTEXTS: Lazy<Mutex<HashMap<u32, PhysicsContext>>> =
+pub static PHYSICS_CONTEXTS: Lazy<Mutex<HashMap<u32, PhysicsContext>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Maximum number of collision events to process per tick
@@ -75,31 +81,51 @@ fn drain_collision_events(rx: &Receiver<rapier3d::geometry::CollisionEvent>) -> 
 }
 
 // Apply updated positions, rotations, velocities, and chunk coords back to the DB
-fn apply_position_updates(ctx: &ReducerContext, world: &PhysicsContext) {
-    let mut updates = Vec::new();
-    for (_handle, body) in world.bodies.iter() {
-        let pbid = PhysicsBodyId::from(Identity::from_u256(body.user_data.into()));
-        updates.push((pbid, *body.translation(), *body.rotation(), *body.linvel(), *body.angvel()));
-    }
-    for (ent_id, pos, rot, linvel, angvel) in updates {
-        if let Some(mut row) = ctx.db.physics_body().entity_id().find(ent_id) {
-            row.pos_x = pos.x;
-            row.pos_y = pos.y;
-            row.pos_z = pos.z;
-            // spatial indexing
-            row.chunk_x = calculate_chunk(pos.x);
-            row.chunk_y = calculate_chunk(pos.z);
-            row.rot_x = rot.i;
-            row.rot_y = rot.j;
-            row.rot_z = rot.k;
-            row.rot_w = rot.w;
-            row.vel_x = linvel.x;
-            row.vel_y = linvel.y;
-            row.vel_z = linvel.z;
-            row.ang_vel_x = angvel.x;
-            row.ang_vel_y = angvel.y;
-            row.ang_vel_z = angvel.z;
-            ctx.db.physics_body().entity_id().update(row);
+fn apply_position_updates(ctx: &ReducerContext, world: &mut PhysicsContext) {
+    // Only update rows when transform changed since last tick
+    for (handle, body) in world.bodies.iter() {
+        let pos = *body.translation();
+        let rot = *body.rotation();
+        // lookup last transform
+        let entry = world.last_transforms.get(&handle);
+        if entry.map_or(true, |(old_pos, old_rot)| *old_pos != pos || *old_rot != rot) {
+            // transform changed: write back to DB
+            let pbid = PhysicsBodyId::from(Identity::from_u256(body.user_data.into()));
+            if let Some(mut row) = ctx.db.physics_body().entity_id().find(pbid) {
+                row.pos_x = pos.x;
+                row.pos_y = pos.y;
+                row.pos_z = pos.z;
+                // compute and assign new chunk coordinates in XY plane
+                let new_chunk_x = calculate_chunk(pos.x);
+                let new_chunk_y = calculate_chunk(pos.z);
+                row.chunk_x = new_chunk_x;
+                row.chunk_y = new_chunk_y;
+                row.rot_x = rot.i;
+                row.rot_y = rot.j;
+                row.rot_z = rot.k;
+                row.rot_w = rot.w;
+                // velocities and angular velocities unchanged here or update if needed
+                ctx.db.physics_body().entity_id().update(row);
+                // Sync chunk_entities view after moving (using XY)
+                upsert_entity(
+                    ctx,
+                    pbid.0,
+                    "physics_body",
+                    pos.x,
+                    pos.y,
+                    new_chunk_x,
+                    new_chunk_y,
+                    None,
+                );
+                // print debug info for chunks
+                log::info!("Called inside apply_position_updates {} moved to chunk ({}, {})", pbid.0.to_hex().chars().take(8).collect::<String>(), new_chunk_x, new_chunk_y);
+                // record new transform
+                world.last_transforms.insert(handle, (pos, rot));
+            }
+            log::info!("Updated physics body {} to position ({}, {}, {}) and rotation ({}, {}, {}, {}) via physics tick",
+                pbid.0.to_hex().chars().take(8).collect::<String>(),
+                pos.x, pos.y, pos.z,
+                rot.i, rot.j, rot.k, rot.w);
         }
     }
 }
@@ -114,6 +140,7 @@ pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Resu
     
     let region = schedule.region;
     //log::debug!("Physics tick running for region {}", region);
+    //log::debug!("Called at timestamp {}", ctx.timestamp);
     
     // lock and get or init context
     let mut map = PHYSICS_CONTEXTS.lock().unwrap();
@@ -131,6 +158,7 @@ pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Resu
             impulse_joints: ImpulseJointSet::new(),
             multibody_joints: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
+            last_transforms: HashMap::new(),
         }
     });
 
@@ -157,7 +185,7 @@ pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Resu
     );
 
     // Update positions, rotations, velocities, and chunk coords in DB
-    apply_position_updates(ctx, &world);
+    apply_position_updates(ctx, world);
 
     // Drain collision events and warn if at capacity
     let events = drain_collision_events(&collision_rx);
@@ -390,6 +418,7 @@ pub fn spawn_rigid_body(
             impulse_joints: ImpulseJointSet::new(),
             multibody_joints: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
+            last_transforms: HashMap::new(),
         }
     });
 
@@ -417,12 +446,13 @@ pub fn spawn_rigid_body(
     world.colliders.insert_with_parent(col_builder.build(), body_handle, &mut world.bodies);
 
     // Calculate chunk coordinates for spatial partitioning
-    let chunk_x = types::calculate_chunk(x);
-    let chunk_y = types::calculate_chunk(y);
+    let chunk_x = calculate_chunk(x);
+    let chunk_y = calculate_chunk(y);
 
     // Insert row into physics_body
     let phys = crate::tables::physics_body::PhysicsBody {
         entity_id: physics_entity_id.0,
+        owner_id: ctx.sender,
         region,
         pos_x: x,
         pos_y: y,
@@ -447,6 +477,18 @@ pub fn spawn_rigid_body(
     log::info!("Physics object created: entity_id={}, shape={}, type={}", 
         physics_entity_id.0.to_hex().chars().take(8).collect::<String>(),
         collider_shape, body_type);
+    // Insert into chunk_entities view
+    let (cx, cy) = (chunk_x, chunk_y);
+    upsert_entity(
+        ctx,
+        physics_entity_id.0,
+        "physics_body",
+        x,
+        y,
+        cx,
+        cy,
+        Some(collider_shape.clone()),
+    );
     Ok(())
 }
 
@@ -480,6 +522,8 @@ pub fn despawn_rigid_body(
     }
     // Delete from the PhysicsBody table
     ctx.db.physics_body().entity_id().delete(entity_id);
+    // Remove from chunk_entities view
+    delete_entity(ctx, entity_id);
     // Remove any in-progress contact start times involving this entity
     remove_entity_contacts(&entity_id);
     Ok(())

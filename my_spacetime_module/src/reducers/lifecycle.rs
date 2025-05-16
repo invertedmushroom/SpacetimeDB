@@ -2,11 +2,13 @@ use spacetimedb::{Identity, ReducerContext, Timestamp, ScheduleAt, Table};
 use crate::tables::player::{Player, PlayerStatus};
 use crate::tables::scheduling::PhysicsTickSchedule;
 use crate::tables::game_item::GameItem;
-use crate::calculate_chunk;
 use crate::physics::spawn_rigid_body;
 use crate::tables::game_item::game_item;
 use crate::tables::scheduling::physics_tick_schedule;
 use crate::tables::player::player;
+use crate::spacetime_common::spatial::calculate_chunk;
+use crate::world::request_chunk_subscription::request_chunk_subscription;
+use crate::world::view_updater::upsert_entity;
 
 /**
  * Initialization reducer called when the module is first published.
@@ -30,16 +32,29 @@ pub fn module_init(ctx: &ReducerContext) -> Result<(), String> {
         name: "Health Potion".to_string(),
         item_type: "Consumable".to_string(),
         value: 25,
-        position_x: Some(100.0),
-        position_y: Some(100.0),
-        chunk_x: Some(calculate_chunk(100.0)),
-        chunk_y: Some(calculate_chunk(100.0)),
+        position_x: Some(65.0),
+        position_y: Some(65.0),
+        chunk_x: Some(calculate_chunk(65.0)),
+        chunk_y: Some(calculate_chunk(65.0)),
         is_dropped: true,
         created_at: timestamp,
     };
     
     // Insert into database - pass the struct directly, not a reference
     ctx.db.game_item().insert(health_potion);
+    // Genereate a view table entry for the item
+    // use reference to original item
+    upsert_entity(
+        ctx,
+        Identity::from_u256((1 as u128).into()),
+        "game_item",
+        65.0,
+        65.0,
+        calculate_chunk(65.0),
+        calculate_chunk(65.0),
+        Some("Health Potion".to_string()),
+    );
+    
 
     Ok(())
 }
@@ -60,10 +75,29 @@ pub fn schedule_physics_tick(ctx: &ReducerContext, region: u32, last_id: Option<
         max_id + 1
     };
     
-    // Schedule the next tick 100ms in the future
-    let now = ctx.timestamp;
-    let next_time = now.to_micros_since_unix_epoch() + 100_000; // 100ms in microseconds
-    let next_time = Timestamp::from_micros_since_unix_epoch(next_time);
+    // Determine the base time for the next tick:
+    // - if we have a prior schedule with the ID we're incrementing, use its scheduled_at time
+    // - otherwise fall back to "now"
+    let base_time = if let Some(id) = last_id {
+        if let Some(prev_schedule) = ctx.db.physics_tick_schedule()
+            .scheduled_id()
+            .find(id)
+        {
+            if let ScheduleAt::Time(timestamp) = prev_schedule.scheduled_at {
+                timestamp
+            } else {
+                ctx.timestamp
+            }
+        } else {
+            ctx.timestamp
+        }
+    } else {
+        ctx.timestamp
+    };
+    
+    // Add a fixed 100ms (100,000 μs) to the base time
+    let next_micros = base_time.to_micros_since_unix_epoch() + 100_000;
+    let next_time = Timestamp::from_micros_since_unix_epoch(next_micros);
     
     // Create the schedule entry
     let schedule = PhysicsTickSchedule {
@@ -85,6 +119,7 @@ pub fn schedule_physics_tick(ctx: &ReducerContext, region: u32, last_id: Option<
  * 1. Creating new players for first-time connections
  * 2. Restoring existing players when they reconnect
  * 3. Using the client's Identity to link players to connections
+ * 4. Setting up chunk-based subscriptions
  */
 #[spacetimedb::reducer(client_connected)]
 pub fn on_client_connected(ctx: &ReducerContext) -> Result<(), String> {
@@ -94,19 +129,32 @@ pub fn on_client_connected(ctx: &ReducerContext) -> Result<(), String> {
     // Check if player exists
     let existing_player = ctx.db.player().iter().find(|p| p.player_id == client_id);
     
-    if existing_player.is_none() {
+    let _player = if existing_player.is_none() {
+        // Determine spawn position
+        let spawn_x = 50.0;
+        let spawn_y = 50.0;
+        let chunk_x = calculate_chunk(spawn_x);
+        let chunk_y = calculate_chunk(spawn_y);
+        
+        // Ensure map chunks exist at spawn location before player spawns
+        crate::world::MapManager::ensure_chunks_exist_in_radius(ctx, chunk_x, chunk_y, Some(2))?;
+        
         // Create a new player with default stats
         let new_player = Player {
             player_id: client_id,
             username: format!("Player-{}", client_id.to_string()[0..8].to_string()),
-            position_x: 50.0,
-            position_y: 50.0,
-            chunk_x: calculate_chunk(50.0),
-            chunk_y: calculate_chunk(50.0),
+            position_x: spawn_x,
+            position_y: spawn_y,
+            chunk_x,
+            chunk_y,
             health: 100,
             score: 0,
             status: PlayerStatus::Online,
             last_active: ctx.timestamp,
+            min_x: 0,
+            min_y: 0,
+            max_x: 0,
+            max_y: 0,
         };
         
         // Insert player
@@ -123,12 +171,20 @@ pub fn on_client_connected(ctx: &ReducerContext) -> Result<(), String> {
             "Sphere(0.5)".to_string(),
             2u8,
         )?;
+
+        // Initialize chunk subscription bounds for this client
+        request_chunk_subscription(ctx, new_player.chunk_x, new_player.chunk_y)?;
+        new_player
     } else if let Some(mut player) = existing_player {
         // Update existing player status
         player.status = PlayerStatus::Online;
         player.last_active = ctx.timestamp;
-        ctx.db.player().player_id().update(player);
-    }
+        ctx.db.player().player_id().update(player.clone());
+        player
+    } else {
+        return Err("Failed to create or restore player".to_string());
+    };
+    
     
     Ok(())
 }
