@@ -9,12 +9,14 @@
  * 3. Feature Encapsulation: Grouping related game operations
  */
 use crate::module_bindings::DbConnection;
+use crate::module_bindings::player_table::PlayerTableAccess;
+use crate::module_bindings::game_item_table::GameItemTableAccess;
 use crate::module_bindings::move_player_reducer::move_player;
 use crate::module_bindings::pickup_item_reducer::pickup_item;
 use crate::module_bindings::drop_item_reducer::drop_item;
 use crate::module_bindings::combat_melee_reducer::combat_melee;
 use crate::module_bindings::combat_aoe_reducer::combat_aoe;
-use spacetimedb_sdk::{Identity, DbContext};
+use spacetimedb_sdk::{Identity, Table, TableWithPrimaryKey, DbContext};
 use crate::module_bindings::{Player, GameItem};
 use std::time::Duration;
 use std::collections::HashMap;
@@ -238,7 +240,92 @@ pub struct SubscriptionManager {
     conn: DbConnection,
     state: Arc<Mutex<GameState>>,
 }
+#[allow(dead_code)]
 impl SubscriptionManager {
+    pub fn new(conn: DbConnection) -> Self {
+        let state = Arc::new(Mutex::new(GameState::new()));
+        let state_clone = state.clone();
+        
+        // Set up player subscription callbacks
+        conn.db.player().on_insert(move |_ctx, player| {
+            if let Ok(mut state) = state_clone.lock() {
+                state.update_player(player.clone());
+            }
+        });
+        
+        let state_clone = state.clone();
+        conn.db.player().on_update(move |_ctx, _old, new| {
+            if let Ok(mut state) = state_clone.lock() {
+                state.update_player(new.clone());
+            }
+        });
+        
+        let state_clone = state.clone();
+        conn.db.player().on_delete(move |_ctx, player| {
+            if let Ok(mut state) = state_clone.lock() {
+                state.remove_player(&player.player_id);
+            }
+        });
+        
+        // Set up item subscription callbacks
+        let state_clone = state.clone();
+        conn.db.game_item().on_insert(move |_ctx, item| {
+            if let Ok(mut state) = state_clone.lock() {
+                state.update_item(item.clone());
+            }
+        });
+        
+        let state_clone = state.clone();
+        conn.db.game_item().on_update(move |_ctx, _old, new| {
+            if let Ok(mut state) = state_clone.lock() {
+                state.update_item(new.clone());
+            }
+        });
+        
+        let state_clone = state.clone();
+        conn.db.game_item().on_delete(move |_ctx, item| {
+            if let Ok(mut state) = state_clone.lock() {
+                state.remove_item(item.item_id);
+            }
+        });
+        
+        Self { conn, state }
+    }
+    
+    // /// Start a spatial subscription for dropped items; client does radius filtering locally
+    // pub fn subscribe_to_area(&self, _center: (f32, f32), _radius: f32) {
+    //     self.conn.subscription_builder()
+    //         .on_error(|_ctx, err| log::info!("Area subscription error: {}", err))
+    //         .subscribe(vec!["SELECT * FROM game_item WHERE is_dropped = true".to_string()]);
+    // }
+    
+    // /// Subscribe to all items owned by the player
+    // pub fn subscribe_to_inventory(&self, player_id: Identity) {
+    //     let query = format!(
+    //         "SELECT * FROM game_item WHERE owner_id = '{}'",
+    //         player_id
+    //     );
+        
+    //     self.conn.subscription_builder()
+    //         .on_error(|_ctx, err| log::info!("Inventory subscription error: {}", err))
+    //         .subscribe(vec![query]);
+    // }
+    
+    /// Get access to the shared game state
+    pub fn get_state(&self) -> Arc<Mutex<GameState>> {
+        self.state.clone()
+    }
+    
+    /// Get the underlying connection
+    pub fn get_connection(&self) -> &DbConnection {
+        &self.conn
+    }
+}
+
+#[allow(dead_code)]
+
+pub fn execute_command<A: GameActions>(actions: &A, command: impl GameCommand) -> Result<(), GameError> {
+    command.execute(actions)
 }
 
 /// Execute a game action with retry on network failures
@@ -260,10 +347,50 @@ pub struct ChunkSubscriptionManager {
 
 impl ChunkSubscriptionManager {
     pub fn new(conn: DbConnection) -> Self {
-        // subscription handle constructed here did not get executed and was removed
+        // Register callbacks to update local game state on item changes
+        let state = conn.get_state();
+        // on insert
+        {
+            let state_clone = state.clone();
+            conn.db.game_item().on_insert(move |_ctx, item| {
+                if let Ok(mut s) = state_clone.lock() { s.update_item(item.clone()); }
+            });
+        }
+        // on update
+        {
+            let state_clone = state.clone();
+            conn.db.game_item().on_update(move |_ctx, _old, new| {
+                if let Ok(mut s) = state_clone.lock() { s.update_item(new.clone()); }
+            });
+        }
+        // on delete
+        {
+            let state_clone = state.clone();
+            conn.db.game_item().on_delete(move |_ctx, item| {
+                if let Ok(mut s) = state_clone.lock() { s.remove_item(item.item_id); }
+            });
+        }
+        
+        // // Initial subscription to all items to seed local state
+        // // This is commented since it does not get executed after we changed code in main function in main.rs
+        // let initial_state = conn.get_state();
+        // let state_clone = initial_state.clone();
+        // let init_sub = conn.subscription_builder()
+        //     .on_error(|_ctx, err| log::info!("Initial subscribe error: {}", err))
+        //     .on_applied(move |ctx| {
+        //         if let Ok(mut s) = state_clone.lock() {
+        //             s.items.clear();
+        //             for item in ctx.db.game_item().iter() {
+        //                 s.update_item(item.clone());
+        //             }
+        //         }
+        //         log::info!("Initial items loaded: {}", ctx.db.game_item().iter().count());
+        //     })
+        //     .subscribe(vec!["SELECT * FROM game_item".to_string()]);
         let manager = Self { 
             conn, 
-            subscription_handle: None, 
+            //subscription_handle: Some(init_sub), 
+            subscription_handle: None,
             current_chunk: None,
             current_subscription_area: None,
         };
