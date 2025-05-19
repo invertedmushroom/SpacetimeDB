@@ -1,8 +1,9 @@
 use spacetimedb::Identity;
 
 #[spacetimedb::table(
-    name = physics_body,
-    index(name = idx_owner, btree(columns = [owner_id]))
+    name = physics_body, public,
+    index(name = idx_owner, btree(columns = [owner_id])),
+    index(name = idx_chunk, btree(columns = [chunk_x, chunk_y]))
 )]
 #[derive(Clone)]
 pub struct PhysicsBody {

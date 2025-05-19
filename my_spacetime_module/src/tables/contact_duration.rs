@@ -1,6 +1,6 @@
 use spacetimedb::{table, Timestamp, Identity};
 
-#[table(name = contact_duration)]
+#[table(name = contact_duration, public)]
 #[derive(Clone)]
 pub struct ContactDuration {
     #[primary_key]

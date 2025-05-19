@@ -8,7 +8,6 @@ mod client;
 mod game_features;
 
 use spacetimedb_sdk::{DbContext, Table};
-use crate::module_bindings::player_table::PlayerTableAccess;
 use crate::game_features::{GameActions, ChunkSubscriptionManager, MoveAndPickupCommand, GameCommand, with_retry};
 use crate::module_bindings::DbConnection;
 use std::io::Write;
@@ -17,6 +16,7 @@ use crate::module_bindings::spawn_rigid_body_reducer::spawn_rigid_body;
 use crate::module_bindings::despawn_rigid_body_reducer::despawn_rigid_body;
 use crate::module_bindings::contact_duration_table::ContactDurationTableAccess;
 use crate::module_bindings::physics_body_table::PhysicsBodyTableAccess;
+use crate::module_bindings::player_table::PlayerTableAccess;
 
 // Macro to parse typed arguments or print usage and return
 macro_rules! parse_args {
@@ -65,21 +65,42 @@ struct GameContext {
     chunk_mgr: ChunkSubscriptionManager,
     current_position: (f32, f32),
     player_id: spacetimedb_sdk::Identity,
+    player_phy_entity_id: spacetimedb_sdk::Identity,
+}
+
+impl GameContext {
+    /// Refresh `current_position` from the player's physics_body row
+    fn refresh_position(&mut self) {
+        let conn = self.chunk_mgr.get_connection();
+        if let Some(body) = conn.db.physics_body().iter().find(|p| p.entity_id == self.player_phy_entity_id) {
+            self.current_position = (body.pos_x, body.pos_y);
+            println!("Current position updated to ({}, {})", self.current_position.0, self.current_position.1);
+        }
+        else {
+            println!("Failed to refresh position: player physics body not found");
+        }
+    }
 }
 
 // Handler implementations
 fn cmd_move(ctx: &mut GameContext, parts: &[&str]) {
     parse_args!(parts, "m <x> <y>", x: f32, y: f32);
-    let conn = ctx.chunk_mgr.get_connection();
-    let result = with_retry(conn, || conn.move_player(x, y));
-    match result {
-        Ok(_) => {
-            ctx.current_position = (x, y);
-            ctx.chunk_mgr.update_subscription_for_position(x, y);
-            println!("Moved successfully.");
-        }
-        Err(e) => println!("Failed to move: {}", e),
+    // Execute move with a short-lived connection borrow
+    // Perform move and drop the borrow before modifying `ctx`
+    let move_result = {
+        let conn_ref = ctx.chunk_mgr.get_connection();
+        with_retry(conn_ref, || conn_ref.move_player(x, y))
+    };
+    if let Err(e) = move_result {
+        println!("Failed to move: {}", e);
+        return;
     }
+    // On success, wait for physics to settle, refresh position, and update subscriptions
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    ctx.refresh_position();
+    println!("Moved to ({}, {})", ctx.current_position.0, ctx.current_position.1);
+    ctx.chunk_mgr.update_subscription_for_position(ctx.current_position.0, ctx.current_position.1);
+    println!("Moved successfully.");
 }
 
 fn cmd_pickup(ctx: &mut GameContext, parts: &[&str]) {
@@ -212,23 +233,25 @@ fn cmd_spawn_object(ctx: &mut GameContext, parts: &[&str]) {
     
     let shape = parts[0].to_string();
     let body_type: u8 = parts[1].parse().unwrap_or(1);
-    
-    // Current position
+        
+    // Refresh and use current player position for spawning
+    ctx.refresh_position();
     let (x, y) = ctx.current_position;
-    let z = 1.0;  // Height above ground
-    
-    let conn = ctx.chunk_mgr.get_connection();
-    
-    // Spawn a rigid body with requested parameters
-    match conn.reducers.spawn_rigid_body(
-        //ctx.player_id,  // entity_id (owner)
-        0,              // region
-        x,              // x position
-        z,              // y position (height)
-        y,              // z position
-        shape,          // shape descriptor
-        body_type,      // body type
-    ) {
+    let z = 1.0;
+
+    // Spawn a rigid body with requested parameters in a scoped borrow
+    let spawn_result = {
+        let conn_ref = ctx.chunk_mgr.get_connection();
+        conn_ref.reducers.spawn_rigid_body(
+            0,              // region
+            x,              // x position
+            y,              // y position (height)
+            z,              // z position
+            shape.clone(),  // shape descriptor
+            body_type,      // body type
+        )
+    };
+    match spawn_result {
         Ok(_) => println!("Object spawned at ({}, {}, {})", x, z, y),
         Err(e) => println!("Failed to spawn object: {}", e),
     }
@@ -398,37 +421,21 @@ fn cmd_show_contacts(ctx: &mut GameContext, _parts: &[&str]) {
 
 fn cmd_show_physics_bodies(ctx: &mut GameContext, _parts: &[&str]) {
     let conn = ctx.chunk_mgr.get_connection();
-    
-    println!("\nPhysics Bodies:");
-    println!("---------------");
-    
-    // Get physics bodies
-    let bodies: Vec<_> = conn.db.physics_body().iter()
+    println!("\nPhysics Bodies (chunk_entities view):");
+    println!("-------------------------------------");
+    // Iterate over the subscribed physics bodies
+    let entities: Vec<_> = conn.db.physics_body().iter()
         .collect();
-    
-    if bodies.is_empty() {
-        println!("No physics bodies found.");
+    if entities.is_empty() {
+        println!("No physics bodies in the current chunks.");
     } else {
-        println!("Entity ID         | Type | Shape             | Position");
-        println!("------------------|------|-------------------|------------------");
-        
-        for body in bodies {
-            // Show full entity ID so users can copy/paste for despawn
-            let entity_id = body.entity_id.to_hex();
-            
-            // Get type name
-            let type_name = match body.body_type {
-                0 => "Static",
-                1 => "Dynamic",
-                2 => "Kinematic",
-                10 => "Projectile",
-                20 => "Player",
-                _ => "Unknown",
-            };
-            
-            println!("{} | {:4} | {:17} | ({:.1}, {:.1}, {:.1})",
-                     entity_id, type_name, body.collider_shape,
-                     body.pos_x, body.pos_y, body.pos_z);
+        println!("Entity ID                                                        | Shape             | Position (x,y,z)  | Body Type");
+        println!("-----------------------------------------------------------------|-------------------|-------------------|----------");
+        for e in entities {
+            let id = e.entity_id.to_hex();
+            let shape = e.collider_shape.clone();
+            let body_type: u8 = e.body_type;
+            println!("{} | {:17} | ({:.1}, {:.1}, {:.1})     {}", id, shape, e.pos_x, e.pos_y, e.pos_z, body_type);
         }
     }
     println!();
@@ -466,46 +473,63 @@ fn main() {
     let conn = client::create_connection();
     println!("Connected to SpacetimeDB!");
 
-    // Get the player identity from the connection
-    let player_id = conn.try_identity().unwrap_or_default();
-    println!("Player ID: {:?}", player_id);
-    
-    // Start WebSocket message processing in background thread
+    // Start listening and assign identity via try_identity polling
     let _conn_handle = conn.run_threaded();
-    
-    // Default starting position when no position is found
+
+    // Get the player identity from the connection (retry until assigned)
+    let player_id = loop {
+        if let Some(id) = conn.try_identity() {
+            break id;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    println!("Player ID: {:?}", player_id);
+
+    // Subscribe to the player table so we can load our player row 
+    // (was same subscription in cient.rs "start_subscription" function but not called here jet)
+    let _player_sub = conn.subscription_builder()
+        .on_error(|_ctx, err| eprintln!("Player subscription error: {}", err))
+        .subscribe(vec!["SELECT * FROM player".to_string()]);
+
+    // Subscribe to contact_duration table to receive contact duration records on the client
+    let _contact_sub = conn.subscription_builder()
+        .on_error(|_ctx, err| eprintln!("Contact subscription error: {}", err))
+        .subscribe(vec!["SELECT * FROM contact_duration".to_string()]);
+
+    // Default starting position when no position is found (will update after subscription)
     let mut current_position = (50.0, 50.0);
-    
-    // Wait briefly to allow connection to initialize
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    
-    // Update based on actual player position from server (if available)
-    if let Some(player) = conn.db.player().iter().find(|p| p.player_id == player_id) {
-        current_position = (player.position_x, player.position_y);
-    }
-    
+
     // Initialize chunk subscription manager with our connection
     let mut chunk_mgr = ChunkSubscriptionManager::new(conn);
     println!("Chunk subscription manager initialized.");
 
     // Subscribe to player's inventory
     chunk_mgr.subscribe_to_inventory(player_id);
-
+    // Subscribe to game items
+    chunk_mgr.subscribe_to_game_items();
     // Initial subscription based on starting position
     chunk_mgr.update_subscription_for_position(current_position.0, current_position.1);
+    // Wait briefly for physics_body updates
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Try loading position from server-side physics_body via chunk manager
+    if let Some(body) = chunk_mgr.get_connection().db.physics_body().iter().find(|p| p.owner_id == player_id) {
+        current_position = (body.pos_x, body.pos_y);
+    } else {
+        println!("No player's physics_body found in subscribed chunks.");
+    }
     println!("Initial position: ({}, {})", current_position.0, current_position.1);
 
-    // Subscribe to physics_body and contact_duration tables using chunk_mgr's connection
-    let physics_conn = chunk_mgr.get_connection();
-    let _physics_sub = physics_conn.subscription_builder()
-        .on_error(|_ctx, err| eprintln!("Subscription error: {}", err))
-        .subscribe(vec![
-            "SELECT * FROM physics_body".to_string(),
-            "SELECT * FROM contact_duration".to_string(),
-        ]);
+    // Get the player's `phy_entity_id` from the player table
+    let player_phy_entity_id = chunk_mgr.get_connection().db.player().iter()
+        .find(|p| p.player_id == player_id)
+        .map(|p| p.phy_entity_id)
+        .unwrap_or_else(|| {
+            println!("No Player row found in database.");
+            spacetimedb_sdk::Identity::default()
+        });
 
     // Build game context
-    let context = GameContext { chunk_mgr, current_position, player_id };
+    let context = GameContext { chunk_mgr, current_position, player_id, player_phy_entity_id};
     let mut ctx = context;
 
     // Main game loop
