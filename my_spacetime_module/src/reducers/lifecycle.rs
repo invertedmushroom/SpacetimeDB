@@ -1,4 +1,5 @@
 use spacetimedb::{Identity, ReducerContext, Timestamp, ScheduleAt, Table};
+use crate::tables::physics_body::physics_body;
 use crate::tables::player::{Player, PlayerStatus};
 use crate::tables::scheduling::PhysicsTickSchedule;
 use crate::tables::game_item::GameItem;
@@ -7,9 +8,7 @@ use crate::tables::game_item::game_item;
 use crate::tables::scheduling::physics_tick_schedule;
 use crate::tables::player::player;
 use crate::spacetime_common::spatial::calculate_chunk;
-use crate::world::request_chunk_subscription::request_chunk_subscription;
-use crate::world::view_updater::upsert_entity;
-
+use crate::spacetime_common::collision::STATIC_BODY_TYPE;
 /**
  * Initialization reducer called when the module is first published.
  * 
@@ -42,20 +41,18 @@ pub fn module_init(ctx: &ReducerContext) -> Result<(), String> {
     
     // Insert into database - pass the struct directly, not a reference
     ctx.db.game_item().insert(health_potion);
-    // Genereate a view table entry for the item
-    // use reference to original item
-    upsert_entity(
-        ctx,
-        Identity::from_u256((1 as u128).into()),
-        "game_item",
-        65.0,
-        65.0,
-        calculate_chunk(65.0),
-        calculate_chunk(65.0),
-        Some("Health Potion".to_string()),
-    );
-    
 
+    // Spawn a static ground collider
+    spawn_rigid_body(
+        ctx,
+        0, // physics region
+        50.0,
+        50.0,
+        -1.0,
+        format!("Box({}, {}, {})", 1000, 0.1, 1000),
+        STATIC_BODY_TYPE,
+    )?;
+   
     Ok(())
 }
 
@@ -139,41 +136,43 @@ pub fn on_client_connected(ctx: &ReducerContext) -> Result<(), String> {
         // Ensure map chunks exist at spawn location before player spawns
         crate::world::MapManager::ensure_chunks_exist_in_radius(ctx, chunk_x, chunk_y, Some(2))?;
         
+        // Spawn physics body for new player
+        spawn_rigid_body(
+            ctx,
+            0u32,
+            spawn_x,
+            spawn_y,
+            0.0f32,
+            "Sphere(0.5)".to_string(),
+            2u8,
+        )?;
+        // Find rigid body by owner tag and extract entity_id
+        let player_physical_object = ctx.db.physics_body()
+            .iter()
+            .find(|p| p.owner_id == client_id)
+            .ok_or_else(|| "Failed to spawn player physics body".to_string())?;
+        let player_physical_object_id = player_physical_object.entity_id;
+
         // Create a new player with default stats
         let new_player = Player {
             player_id: client_id,
             username: format!("Player-{}", client_id.to_string()[0..8].to_string()),
-            position_x: spawn_x,
-            position_y: spawn_y,
-            chunk_x,
-            chunk_y,
             health: 100,
             score: 0,
             status: PlayerStatus::Online,
             last_active: ctx.timestamp,
-            min_x: 0,
-            min_y: 0,
-            max_x: 0,
-            max_y: 0,
+            phy_entity_id: player_physical_object_id,
         };
         
         // Insert player
         ctx.db.player().insert(new_player.clone());
         log::info!("Created new player: {}", new_player.username);
 
-        // Spawn physics body for new player
-        spawn_rigid_body(
-            ctx,
-            0u32,
-            new_player.position_x,
-            new_player.position_y,
-            0.0f32,
-            "Sphere(0.5)".to_string(),
-            2u8,
-        )?;
+        // Removed position and chunk fileds from player table
+        // move_player reducer uses ctx.sender to match physics_body table to update on move
+        // ensure spawn_rigid_body has correct owner_id as that is what will be used to match in other parts
 
         // Initialize chunk subscription bounds for this client
-        request_chunk_subscription(ctx, new_player.chunk_x, new_player.chunk_y)?;
         new_player
     } else if let Some(mut player) = existing_player {
         // Update existing player status
@@ -214,17 +213,5 @@ pub fn on_client_disconnected(ctx: &ReducerContext) -> Result<(), String> {
         log::info!("Player {} is now offline", player.username);
     }
     
-    Ok(())
-}
-
-/**
- * Dummy reducer for testing connection functionality.
- * 
- * Heartbeat/connectivity verification
- * This reducer demonstrates a minimal implementation for verifying
- * that the client can successfully call reducers.
- */
-#[spacetimedb::reducer]
-pub fn dummy(_ctx: &ReducerContext) -> Result<(), String> {
     Ok(())
 }

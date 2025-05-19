@@ -1,8 +1,7 @@
 use spacetimedb::{Identity, ReducerContext, Table};
-use crate::tables::player::player;
+//use crate::tables::player::player;
 use crate::tables::game_item::game_item;
 use crate::world::MapManager;
-use crate::world::view_updater::{upsert_entity, delete_entity};
 use crate::spacetime_common::spatial::calculate_chunk;
 use rapier3d::na::Point3;
 use crate::tables::physics_body::physics_body;
@@ -14,18 +13,14 @@ use crate::spacetime_common::spatial::are_chunks_adjacent;
  * Player movement reducer.
  * 
  * Position-based game mechanics
- * 1. Validating game world boundaries
- * 2. Updating player position
- * 3. Activity tracking for idle detection
- * 4. Managing chunk-based subscriptions
- * 5. Ensuring map chunks exist before player enters
  */
 #[spacetimedb::reducer]
 pub fn move_player(ctx: &ReducerContext, new_x: f32, new_y: f32) -> Result<(), String> {
     let player_id = ctx.sender;
     
-    if let Some(player) = ctx.db.player().iter().find(|p| p.player_id == player_id) {
-        let mut player = player.clone();
+    if let Some(player_physical_object) = ctx.db.physics_body().iter().find(|p| p.owner_id == player_id) {
+        
+        let player = player_physical_object.clone();
 
         // disallow moving further than adjacent chunks
         {
@@ -54,29 +49,8 @@ pub fn move_player(ctx: &ReducerContext, new_x: f32, new_y: f32) -> Result<(), S
             MapManager::ensure_chunks_exist_in_radius(ctx, new_chunk_x, new_chunk_y, None)?;
         }
         
-        // Update player position and other data
-        player.position_x = new_x;
-        player.position_y = new_y;
-        player.chunk_x = new_chunk_x;
-        player.chunk_y = new_chunk_y;
-        player.last_active = ctx.timestamp;
-        
-        // Update player using primary key column
-        ctx.db.player().player_id().update(player.clone());
-        // Update view table for this player
-        upsert_entity(
-            ctx,
-            player_id,
-            "player",
-            new_x,
-            new_y,
-            new_chunk_x,
-            new_chunk_y,
-            None,
-        );
-        // Player and it's public view table position out of sync with physics body
-        // if simulation results in a different position
-        log::info!("Player {} moved to ({}, {})", player.username, new_x, new_y);
+        // Nov let the simulation update physics_body position
+        log::info!("Physics_body with entity_id {} and owner_id {} will move to ({}, {}), on next physics tick", player.entity_id, player.owner_id, new_x, new_y);
         // Teleport the player's physics body via Rapier
         if let Some(phys) = ctx.db.physics_body().iter().find(|b| b.owner_id == player_id) {
             let mut contexts = PHYSICS_CONTEXTS.lock().unwrap();
@@ -94,8 +68,8 @@ pub fn move_player(ctx: &ReducerContext, new_x: f32, new_y: f32) -> Result<(), S
                 // now teleport each matching body
                 for h in handles {
                     if let Some(rb) = world.bodies.get_mut(h) {
-                        rb.set_next_kinematic_position(Isometry3::translation(new_x, 0.0, new_y));
-                        log::info!("Teleported physics body {} to ({}, {})", phys.entity_id.to_hex(), new_x, new_y);
+                        rb.set_next_kinematic_position(Isometry3::translation(new_x, new_y, 0.0));
+                        log::info!("Teleported physics body {} to ({}, {}), on next physics tick", phys.entity_id.to_hex(), new_x, new_y);
                     }
                 }
             }
@@ -119,8 +93,8 @@ pub fn pickup_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
     let player_id = ctx.sender;
     log::info!("Player {} is trying to pick up item {}", player_id, item_id);
 
-    // Verify player exists
-    let player = ctx.db.player().iter().find(|p| p.player_id == player_id).ok_or("Player not found".to_string())?;
+    // Verify player's object exists
+    let player_physical_object = ctx.db.physics_body().iter().find(|p| p.owner_id == player_id).ok_or("Player not found".to_string())?;
 
     // Find the item
     let item = ctx.db.game_item().iter().find(|i| i.item_id == item_id).ok_or("Item not found".to_string())?.clone();
@@ -131,10 +105,10 @@ pub fn pickup_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
     }
 
     // Chunk-based pre-check: ensure item is in current or adjacent chunk
-    let player_chunk = (player.chunk_x, player.chunk_y);
+    let player_chunk = (player_physical_object.chunk_x, player_physical_object.chunk_y);
     if let (Some(item_cx), Some(item_cy)) = (item.chunk_x, item.chunk_y) {
         log::info!("Chunk pre-check: player_chunk={:?}, item_chunk=({}, {})", player_chunk, item_cx, item_cy);
-        if !are_chunks_adjacent(player.chunk_x, player.chunk_y, item_cx, item_cy) {
+        if !are_chunks_adjacent(player_physical_object.chunk_x, player_physical_object.chunk_y, item_cx, item_cy) {
             return Err("Item is too far away (not in adjacent chunks)".to_string());
         }
     } else {
@@ -142,16 +116,10 @@ pub fn pickup_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
     }
 
     // Use rapier3d for precise proximity check
-    // TODO use physics body position linked to player (and item)
     if let (Some(item_x), Some(item_y)) = (item.position_x, item.position_y) {        
-        let player_position = Point3::new(player.position_x, player.position_y, 0.0);
+        let player_position = Point3::new(player_physical_object.pos_x, player_physical_object.pos_y, 0.0);
         let item_position = Point3::new(item_x, item_y, 0.0);
         let distance = (player_position - item_position).norm();
-
-        // // Debug: print chunk positions for player and item
-        // let pi_chunk = (player.chunk_x, player.chunk_y);
-        // let it_chunk = (item.position_x.map(calculate_chunk).unwrap_or(-999), item.position_y.map(calculate_chunk).unwrap_or(-999));
-        // log::info!("Pickup debug: player at chunk {:?}, item at chunk {:?}", pi_chunk, it_chunk);
 
         // Define pickup radius
         let pickup_radius = 2.0;
@@ -174,10 +142,9 @@ pub fn pickup_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
 
     // Update item using primary key column
     ctx.db.game_item().item_id().update(updated_item);
-    // Remove from view table
-    delete_entity(ctx, Identity::from_u256((item_id as u128).into()));
 
-    log::info!("Player {} picked up item {}", player.username, item.name);
+    log::info!("Physics body with owner_id {} picked up item {}", player_physical_object.owner_id, item.name);
+    // physics_body owner_id of player is the same as player_id of player
     Ok(())
 }
 
@@ -194,7 +161,7 @@ pub fn drop_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
     let player_id = ctx.sender;
     
     // Verify player exists
-    let player = match ctx.db.player().iter().find(|p| p.player_id == player_id) {
+    let player = match ctx.db.physics_body().iter().find(|p| p.owner_id == player_id) {
         Some(p) => p,
         None => return Err("Player not found".to_string()),
     };
@@ -209,26 +176,15 @@ pub fn drop_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
         // Update item to be dropped at player's position
         item.owner_id = Identity::default();
         item.is_dropped = true;
-        item.position_x = Some(player.position_x);
-        item.position_y = Some(player.position_y);
+        item.position_x = Some(player.pos_x);
+        item.position_y = Some(player.pos_y);
         item.chunk_x = Some(player.chunk_x);
         item.chunk_y = Some(player.chunk_y);
         
         // Update item using primary key column
         ctx.db.game_item().item_id().update(item.clone());
-        // Insert into view table
-        upsert_entity(
-            ctx,
-            Identity::from_u256((item_id as u128).into()),
-            "game_item",
-            player.position_x,
-            player.position_y,
-            player.chunk_x,
-            player.chunk_y,
-            Some(item.name.clone()),
-        );
-        
-        log::info!("Player {} dropped item {}", player.username, item.name);
+                
+        log::info!("Physics body with entity_id {} and owner_id {} dropped item {}", player.entity_id, player.owner_id, item.name);
         Ok(())
     } else {
         Err("Item not found".to_string())

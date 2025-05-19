@@ -22,7 +22,6 @@ use crate::spacetime_common::spatial::calculate_chunk;
 
 use crate::spacetime_common::types;
 use crate::spacetime_common::collision;
-use crate::world::view_updater::{upsert_entity, delete_entity};
 
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -97,7 +96,7 @@ fn apply_position_updates(ctx: &ReducerContext, world: &mut PhysicsContext) {
                 row.pos_z = pos.z;
                 // compute and assign new chunk coordinates in XY plane
                 let new_chunk_x = calculate_chunk(pos.x);
-                let new_chunk_y = calculate_chunk(pos.z);
+                let new_chunk_y = calculate_chunk(pos.y);
                 row.chunk_x = new_chunk_x;
                 row.chunk_y = new_chunk_y;
                 row.rot_x = rot.i;
@@ -106,24 +105,14 @@ fn apply_position_updates(ctx: &ReducerContext, world: &mut PhysicsContext) {
                 row.rot_w = rot.w;
                 // velocities and angular velocities unchanged here or update if needed
                 ctx.db.physics_body().entity_id().update(row);
-                // Sync chunk_entities view after moving (using XY)
-                upsert_entity(
-                    ctx,
-                    pbid.0,
-                    "physics_body",
-                    pos.x,
-                    pos.y,
-                    new_chunk_x,
-                    new_chunk_y,
-                    None,
-                );
+                
                 // print debug info for chunks
-                log::info!("Called inside apply_position_updates {} moved to chunk ({}, {})", pbid.0.to_hex().chars().take(8).collect::<String>(), new_chunk_x, new_chunk_y);
+                log::info!("Called inside apply_position_updates {} moved to chunk ({}, {})", pbid.0.to_hex().chars().collect::<String>(), new_chunk_x, new_chunk_y);
                 // record new transform
                 world.last_transforms.insert(handle, (pos, rot));
             }
             log::info!("Updated physics body {} to position ({}, {}, {}) and rotation ({}, {}, {}, {}) via physics tick",
-                pbid.0.to_hex().chars().take(8).collect::<String>(),
+                pbid.0.to_hex().chars().collect::<String>(),
                 pos.x, pos.y, pos.z,
                 rot.i, rot.j, rot.k, rot.w);
         }
@@ -475,20 +464,8 @@ pub fn spawn_rigid_body(
     ctx.db.physics_body().insert(phys);
 
     log::info!("Physics object created: entity_id={}, shape={}, type={}", 
-        physics_entity_id.0.to_hex().chars().take(8).collect::<String>(),
+        physics_entity_id.0.to_hex().chars().collect::<String>(),
         collider_shape, body_type);
-    // Insert into chunk_entities view
-    let (cx, cy) = (chunk_x, chunk_y);
-    upsert_entity(
-        ctx,
-        physics_entity_id.0,
-        "physics_body",
-        x,
-        y,
-        cx,
-        cy,
-        Some(collider_shape.clone()),
-    );
     Ok(())
 }
 
@@ -522,8 +499,6 @@ pub fn despawn_rigid_body(
     }
     // Delete from the PhysicsBody table
     ctx.db.physics_body().entity_id().delete(entity_id);
-    // Remove from chunk_entities view
-    delete_entity(ctx, entity_id);
     // Remove any in-progress contact start times involving this entity
     remove_entity_contacts(&entity_id);
     Ok(())

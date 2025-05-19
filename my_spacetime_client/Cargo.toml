@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-spacetime_common = { path = "../spacetime_common" }
 spacetimedb-sdk = "1.1.1"
 hex = "0.4"
 log = "0.4"
