@@ -1,14 +1,9 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use rapier3d::geometry::CollisionEvent;
+use crate::physics::prelude::*;
+use rapier3d::prelude::*;
 use spacetimedb::{ReducerContext, Identity, Table};
-use crate::physics::PhysicsContext;
+
 use crate::tables::contact_event::ContactEvent;
 use crate::tables::contact_event::contact_event;
-use crate::physics::types::PhysicsBodyId;
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
-use std::collections::HashMap;
-use rapier3d::geometry::ColliderHandle;
 
 static CONTACT_EVENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 

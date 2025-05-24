@@ -1,30 +1,10 @@
-use once_cell::sync::Lazy;
+use crate::physics::prelude::*;
 use rapier3d::prelude::*;
-use rapier3d::dynamics::IslandManager;
-use rapier3d::geometry::BroadPhaseMultiSap;
-use std::collections::HashMap;
 
 use spacetimedb::{reducer, ReducerContext, Identity, Table};
 use crate::tables::physics_body::physics_body;
 use crate::physics::contact_tracker::register_option;
 use crate::spacetime_common::shape::ColliderShape;
-use crate::spacetime_common::types::PhysicsBodyId;
-use crate::spacetime_common::spatial::calculate_chunk;
-use crate::spacetime_common::collision;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-
-use crate::physics::PHYSICS_CONTEXTS; // moving does not work if not imported
-use crate::physics::PhysicsContext;
-
-// Body type constants
-pub const STATIC_BODY_TYPE: u8 = 0;
-pub const DYNAMIC_BODY_TYPE: u8 = 1;
-pub const KINEMATIC_BODY_TYPE: u8 = 2;
-
-// Game-specific body type constants
-pub const PROJECTILE_BODY_TYPE: u8 = 10;
-pub const PLAYER_BODY_TYPE: u8 = 20;
 
 // Unique physics-entity ID counter
 static PHYSICS_ENTITY_COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(1));

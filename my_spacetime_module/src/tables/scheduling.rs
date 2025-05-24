@@ -1,5 +1,5 @@
 use spacetimedb::{table, ScheduleAt};
-use crate::physics::physics_tick;
+use crate::physics::physics_tick::physics_tick;
 
 #[table(name = physics_tick_schedule, scheduled(physics_tick))]
 #[derive(Clone)]
