@@ -31,7 +31,6 @@ pub struct Player {
     pub player_id: Identity,  // Maps directly to client's Identity
     #[unique]
     pub username: String,     // Human-readable identifier
-    pub health: u32,          // Game mechanics attributes
     pub score: u32,
     pub status: PlayerStatus, // Current connection/gameplay state
     pub last_active: Timestamp, // Last activity timestamp for timeout logic

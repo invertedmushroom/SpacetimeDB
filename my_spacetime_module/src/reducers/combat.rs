@@ -2,11 +2,11 @@ use spacetimedb::{Identity, ReducerContext, Table};
 use crate::tables::{physics_body::physics_body, player::player};
 
 /// Apply damage to a player by deleting the old record and inserting the updated one
-pub fn apply_damage(ctx: &ReducerContext, target_id: Identity, damage: u32) -> Result<(), String> {
-    if let Some(mut player) = ctx.db.player().iter().find(|p| p.player_id == target_id).map(|p| p.clone()) {
-        player.health = player.health.saturating_sub(damage);
+pub fn apply_damage(ctx: &ReducerContext, target_id: Identity, _damage: u32) -> Result<(), String> {
+    if let Some(mut _player) = ctx.db.player().iter().find(|p| p.player_id == target_id).map(|p| p.clone()) {
+        //player.health = player.health.saturating_sub(damage);
         // Update player using primary key column
-        ctx.db.player().player_id().update(player.clone());
+        ctx.db.player().player_id().update(_player.clone());
         Ok(())
     } else {
         Err("Target not found".to_string())

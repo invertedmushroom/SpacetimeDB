@@ -157,7 +157,6 @@ pub fn on_client_connected(ctx: &ReducerContext) -> Result<(), String> {
         let new_player = Player {
             player_id: client_id,
             username: format!("Player-{}", client_id.to_string()[0..8].to_string()),
-            health: 100,
             score: 0,
             status: PlayerStatus::Online,
             last_active: ctx.timestamp,

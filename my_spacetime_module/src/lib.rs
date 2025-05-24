@@ -16,7 +16,7 @@ pub mod tables {
     pub mod game_item;
     pub mod physics_body;
     pub mod scheduling;
-    pub mod contact_duration;
+    pub mod contact_event;
     pub mod map_chunk;
 }
 pub mod reducers {
@@ -34,7 +34,7 @@ pub use spacetimedb::{Identity, ReducerContext, Timestamp, SpacetimeType, Table}
 // Re-export table types
 pub use tables::player::{Player, PlayerStatus};
 pub use tables::game_item::GameItem;
-
+pub use tables::contact_event::ContactEvent;
 // Re-export reducer functions
 pub use reducers::lifecycle::{module_init, on_client_connected, on_client_disconnected};
 pub use reducers::world::{move_player, pickup_item, drop_item};

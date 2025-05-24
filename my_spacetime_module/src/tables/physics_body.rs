@@ -10,6 +10,7 @@ pub struct PhysicsBody {
     #[primary_key]
     pub entity_id: Identity,
     pub owner_id: Identity,
+    pub health: u32,
     #[index(btree)]  // index on region for fast region-based queries
     pub region: u32,
     pub pos_x: f32,
