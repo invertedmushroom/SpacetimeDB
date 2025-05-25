@@ -1,9 +1,11 @@
-use crate::physics::prelude::*;
+use crate::physics::rapier_common::*;
 use rapier3d::prelude::*;
 use spacetimedb::{ReducerContext, Identity, Table};
-
 use crate::tables::contact_event::ContactEvent;
 use crate::tables::contact_event::contact_event;
+
+pub use crate::physics::PHYSICS_CONTEXTS;
+pub use crate::physics::PhysicsContext;
 
 static CONTACT_EVENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -52,28 +54,13 @@ pub fn collect_events(
                     // Unpack ID and body_type from Rapier user_data (u128)
                     
                     let data1 = skill_collider.user_data;
-                    //let skill_body_type1 = (data1 >> 120) as u8; //static, dynamic, kinematic, player, projectile
-
                     let data2 = target_collider.user_data;
-                    //let target_body_type2 = (data2 >> 120) as u8;
-                    // Only track if either is dynamic
-                    // if body_type1 != DYNAMIC_BODY_TYPE && body_type2 != DYNAMIC_BODY_TYPE {
-                    //     continue;
-                    // }
-                    let source_id_u64 = ((data1 >> 8) & ((1 << 64) - 1)) as u64;
-                    let target_id_u64 = ((data2 >> 8) & ((1 << 64) - 1)) as u64;
 
-                    let object_function = ((data1 >> 112) & 0xFF) as u8;
-                    let flag = ((data1 >> 111) & 0x1) != 0;
-                    let tick_count = (data1 & 0xFF) as u8;
-
-                    // let object_function = ((data1 >> 112) & 0xFF) as u8;
-                    // let flag = ((data1 >> 111) & 0x1) != 0;
-                    // let tick_count = (data1 & 0xFF) as u8;
-
-                    // let object_function2 = ((data2 >> 112) & 0xFF) as u8;
-                    // let flag2 = ((data2 >> 111) & 0x1) != 0;
-                    // let tick_count2 = (data2 & 0xFF) as u8;
+                    let source_id_u64   = get_raw_id(data1);
+                    let target_id_u64   = get_raw_id(data2);
+                    let object_function = get_object_function(data1);
+                    let flag            = get_flag(data1);
+                    let tick_count      = get_tick_count(data1);
 
                     // Lookup the tag for collider on either handle
                     let map = OPTION_OF_COLLIDER.lock().unwrap();
@@ -108,12 +95,9 @@ pub fn collect_events(
                         world.bodies.get(skill_collider.parent().unwrap()),
                         world.bodies.get(target_collider.parent().unwrap())
                     ) {
-                        // // Ensure PhysicsBodyId unpacking matches how you pack it into rb.user_data
-                        // let source_body_id = PhysicsBodyId::from(Identity::from_u256((rb_skill.user_data & ((1<<120)-1)).into()));
-                        // let target_body_id = PhysicsBodyId::from(Identity::from_u256((rb_target.user_data & ((1<<120)-1)).into()));
-                        let source_id_u64= ((rb_skill.user_data >> 8) & ((1 << 64) - 1)) as u64;
-                        let target_id_u64= ((rb_target.user_data >> 8) & ((1 << 64) - 1)) as u64;
-
+                        // Extract IDs via helper
+                        let source_id_u64 = get_raw_id(rb_skill.user_data);
+                        let target_id_u64 = get_raw_id(rb_target.user_data);
                         contacts.push(PhysicsContact::End { source_id_u64, target_id_u64, region });
                     }
                 }
@@ -128,24 +112,27 @@ pub fn collect_events(
 /// Handle a normalized PhysicsContact by creating or deleting ContactEvent rows
 pub fn handle_event(ctx: &ReducerContext, contact: PhysicsContact) {
     match contact {
-        #[allow(unused_variables)]
-        PhysicsContact::Start { option_id, source_id_u64, target_id_u64, region, object_function, flag, tick_count} => {
+        PhysicsContact::Start { option_id, source_id_u64, target_id_u64, region, object_function, flag, tick_count } => {
             let ce_id = CONTACT_EVENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
             // Extract actual PhysicsBodyIds from unpacked user_data, this should be same as entity_id for the body in DB
-            let source = PhysicsBodyId::from(Identity::from_u256(source_id_u64.into()));
-            let target = PhysicsBodyId::from(Identity::from_u256(target_id_u64.into()));
-            let ev = ContactEvent { id: ce_id, option_id, entity_1: source.0, entity_2: target.0, region, started_at: ctx.timestamp };
+            let source = source_id_u64.into_body_id();
+            let target = target_id_u64.into_body_id();
+            let ev = ContactEvent { id: ce_id, option_id, entity_1: source.into(), entity_2: target.into(), region, started_at: ctx.timestamp };
             ctx.db.contact_event().insert(ev);
-        }
-        PhysicsContact::End { source_id_u64, target_id_u64, region } => {
-            // // Ensure PhysicsBodyId unpacking matches how you pack it into rb.user_data so we can find it in DB
-            let source_body_id = PhysicsBodyId::from(Identity::from_u256(source_id_u64.into()));
-            let target_body_id = PhysicsBodyId::from(Identity::from_u256(target_id_u64.into()));
-            if let Some(row) = ctx.db.contact_event().iter()
-                .find(|e| e.entity_1 == source_body_id.0 && e.entity_2 == target_body_id.0 && e.region == region)
-            {
-                ctx.db.contact_event().id().delete(row.id);
-            }
-        }
-    }
+            // Debug/logging for object_function, flag, tick_count
+            log::debug!("Contact Start: opt={}, src={}, tgt={}, func={}, flag={}, tick={}",
+                option_id.to_hex(), source.0, target.0, object_function, flag, tick_count);
+            // TODO: future logic: update tick_count or dispatch option-specific handlers
+         }
+         PhysicsContact::End { source_id_u64, target_id_u64, region } => {
+            // Convert raw IDs directly into PhysicsBodyId via helper trait
+            let source = source_id_u64.into_body_id();
+            let target = target_id_u64.into_body_id();
+             if let Some(row) = ctx.db.contact_event().iter()
+                .find(|e| e.entity_1 == source.into() && e.entity_2 == target.into() && e.region == region)
+             {
+                 ctx.db.contact_event().id().delete(row.id);
+             }
+         }
+     }
 }

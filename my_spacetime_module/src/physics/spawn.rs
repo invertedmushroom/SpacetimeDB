@@ -1,14 +1,15 @@
-use crate::physics::prelude::*;
+use crate::physics::rapier_common::*;
 use rapier3d::prelude::*;
-
 use spacetimedb::{reducer, ReducerContext, Identity, Table};
 use crate::tables::physics_body::physics_body;
 use crate::physics::contact_tracker::register_option;
 use crate::spacetime_common::shape::ColliderShape;
 
+pub use crate::physics::PHYSICS_CONTEXTS;
+pub use crate::physics::PhysicsContext;
+
 // Unique physics-entity ID counter
 static PHYSICS_ENTITY_COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(1));
-
 
 #[reducer]
 pub fn spawn_rigid_body(
@@ -30,15 +31,16 @@ pub fn spawn_rigid_body(
     let physics_entity_id = PhysicsBodyId::from(Identity::from_u256((phys_id_u64 as u128).into()));
     // Pack user data for the rigid body
     let object_function: u8 = 0; // Player on evrything for now since we use spawn_rigid_body at player creation
-    // The tick count is not used in this context, but we need to provide a value
-    let tick_count: u8 = 0;
-    let packed_user_data = 
-        (u128::from(body_type) << 120) |
-        (u128::from(object_function)  << 112) |
-        (u128::from(0u8)       << 111) |
-        ((u128::from(phys_id_u64) & ((1u128 << 64) - 1)) << 8) |
-        u128::from(tick_count);
-
+    let tick_count: u8 = 0; // The tick count is not used
+    let flag: bool = false; // No special flags for now
+    let data = UserData {
+        body_type,
+        object_function,
+        flag,
+        raw_id: phys_id_u64,
+        tick_count,
+    };
+    let packed_user_data = UserData::pack(data);
 
     // Initialize or get the physics world for this region
     let mut map = PHYSICS_CONTEXTS.lock().unwrap();
@@ -67,7 +69,7 @@ pub fn spawn_rigid_body(
         2 => RigidBodyBuilder::kinematic_position_based(),
         10 => RigidBodyBuilder::dynamic()
             .ccd_enabled(true), // Enable CCD for projectiles
-        20 => RigidBodyBuilder::dynamic(), // Player type
+        20 => RigidBodyBuilder::kinematic_position_based(), // Player type (kinematic for client-controlled movement)
         _ => return Err("Invalid body type".into()),
     }
     .translation(vector![x, y, z])
@@ -132,11 +134,10 @@ pub fn despawn_rigid_body(
     // Lock and get the physics context for this region
     let mut map = PHYSICS_CONTEXTS.lock().unwrap();
     if let Some(world) = map.get_mut(&region) {
-        // Find the handle for the body to remove (drop the iterator before mutation)
-        let pbid = PhysicsBodyId::from(entity_id);
-        let target_ud = pbid.0.to_u256().as_u128();
+        // Find the body by comparing only its raw 64-bit ID (ignoring other packed bits)
+        let target_id = entity_id.to_raw_u64();
         let handle_opt = world.bodies.iter()
-            .find(|(_, b)| b.user_data == target_ud)
+            .find(|(_, b)| get_raw_id(b.user_data) == target_id)
             .map(|(h, _)| h);
         if let Some(handle) = handle_opt {
             // Now safely remove the body and its attached colliders

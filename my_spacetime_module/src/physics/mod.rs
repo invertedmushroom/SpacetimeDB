@@ -1,15 +1,15 @@
-use crate::physics::prelude::*;
+use crate::physics::rapier_common::*;
 use rapier3d::prelude::*;
 //use nalgebra::UnitQuaternion;
 use rapier3d::na::UnitQuaternion;
 use crossbeam::channel::Receiver;
-use spacetimedb::{ ReducerContext, Identity};
+use spacetimedb::ReducerContext;
 use crate::tables::physics_body::physics_body;
 
 pub mod contact_tracker;
 pub mod spawn;
 pub mod physics_tick;
-pub mod prelude;
+pub mod rapier_common;
 
 // Forward old calls to the new spawn.rs
 pub use spawn::{spawn_rigid_body, despawn_rigid_body};
@@ -57,7 +57,8 @@ fn apply_position_updates(ctx: &ReducerContext, world: &mut PhysicsContext) {
         let entry = world.last_transforms.get(&handle);
         if entry.map_or(true, |(old_pos, old_rot)| *old_pos != pos || *old_rot != rot) {
             // transform changed: write back to DB
-            let pbid = PhysicsBodyId::from(Identity::from_u256(body.user_data.into()));
+            let raw_id = get_raw_id(body.user_data);
+            let pbid = raw_id.into_body_id();
             if let Some(mut row) = ctx.db.physics_body().entity_id().find(pbid) {
                 row.pos_x = pos.x;
                 row.pos_y = pos.y;

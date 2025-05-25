@@ -8,6 +8,7 @@ use crate::tables::physics_body::physics_body;
 use crate::physics::PHYSICS_CONTEXTS;
 use rapier3d::na::Isometry3;
 use crate::spacetime_common::spatial::are_chunks_adjacent;
+use crate::physics::rapier_common::*;
 
 /**
  * Player movement reducer.
@@ -58,7 +59,8 @@ pub fn move_player(ctx: &ReducerContext, new_x: f32, new_y: f32) -> Result<(), S
                 // collect handles to avoid borrow conflicts
                 let handles: Vec<_> = world.bodies.iter()
                     .filter_map(|(h, body)| {
-                        if body.user_data == phys.entity_id.to_u256().as_u128() {
+                        let raw_id = get_raw_id(body.user_data);
+                        if raw_id == phys.entity_id.to_raw_u64() {
                             Some(h.clone())
                         } else {
                             None

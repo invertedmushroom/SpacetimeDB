@@ -7,6 +7,7 @@ mod module_bindings;
 mod client;
 mod game_features;
 
+use module_bindings::ContactEventTableAccess;
 use spacetimedb_sdk::{DbContext, Table};
 use crate::game_features::{GameActions, ChunkSubscriptionManager, MoveAndPickupCommand, GameCommand, with_retry};
 use crate::module_bindings::DbConnection;
@@ -14,7 +15,6 @@ use std::io::Write;
 use phf::phf_map;
 use crate::module_bindings::spawn_rigid_body_reducer::spawn_rigid_body;
 use crate::module_bindings::despawn_rigid_body_reducer::despawn_rigid_body;
-use crate::module_bindings::contact_duration_table::ContactDurationTableAccess;
 use crate::module_bindings::physics_body_table::PhysicsBodyTableAccess;
 use crate::module_bindings::player_table::PlayerTableAccess;
 
@@ -96,9 +96,13 @@ fn cmd_move(ctx: &mut GameContext, parts: &[&str]) {
         return;
     }
     // On success, wait for physics to settle, refresh position, and update subscriptions
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(std::time::Duration::from_millis(300));
     ctx.refresh_position();
     println!("Moved to ({}, {})", ctx.current_position.0, ctx.current_position.1);
+    //refresh position does not update the chunk subscription or ctx.current_position
+    (ctx.current_position.0, ctx.current_position.1) = (x, y);
+    println!("Updating chunk subscription for new position ({}, {})", x, y);
+
     ctx.chunk_mgr.update_subscription_for_position(ctx.current_position.0, ctx.current_position.1);
     println!("Moved successfully.");
 }
@@ -395,25 +399,27 @@ fn cmd_show_contacts(ctx: &mut GameContext, _parts: &[&str]) {
     println!("------------------------");
     
     // Get contact durations
-    let contacts: Vec<_> = conn.db.contact_duration().iter().collect();
+    let contacts: Vec<_> = conn.db.contact_event().iter().collect();
     
     if contacts.is_empty() {
         println!("No contact records found.");
     } else {
-        println!("ID  | Entity1                | Entity2                | Duration (ms)");
+        println!("ID  | Entity1                | Entity2                | Started at (ms)");
         println!("----|------------------------|------------------------|-------------");
         
         for contact in contacts {
-            // Convert microseconds to milliseconds for display
-            let duration_ms = contact.duration_micros as f64 / 1000.0;
+            // Get timestamp
+            let duration_ms = contact.started_at;
+            // Get skill_id
+            let skill_id = contact.skill_id.to_hex();
             // Format entity IDs by their last 8 hex digits
             let h1 = contact.entity_1.to_hex().to_string();
             let e1 = &h1[h1.len().saturating_sub(8)..];
             let h2 = contact.entity_2.to_hex().to_string();
             let e2 = &h2[h2.len().saturating_sub(8)..];
             
-            println!("{:3} | {:24} | {:24} | {:9.1}", 
-                     contact.id, e1, e2, duration_ms);
+            println!("{:3} | {:24} | {:24} | {:9.1} | {}", 
+                     contact.id, e1, e2, duration_ms, skill_id);
         }
     }
     println!();
@@ -429,13 +435,13 @@ fn cmd_show_physics_bodies(ctx: &mut GameContext, _parts: &[&str]) {
     if entities.is_empty() {
         println!("No physics bodies in the current chunks.");
     } else {
-        println!("Entity ID                                                        | Shape             | Position (x,y,z)  | Body Type");
-        println!("-----------------------------------------------------------------|-------------------|-------------------|----------");
+        println!("Entity ID         | Shape             | Position (x,y)");
+        println!("------------------|-------------------|--------------");
         for e in entities {
             let id = e.entity_id.to_hex();
             let shape = e.collider_shape.clone();
             let body_type: u8 = e.body_type;
-            println!("{} | {:17} | ({:.1}, {:.1}, {:.1})     {}", id, shape, e.pos_x, e.pos_y, e.pos_z, body_type);
+            println!("{} | {:17} | ({:.1}, {:.1}) {}", id, shape, e.pos_x, e.pos_y, body_type);
         }
     }
     println!();
@@ -494,7 +500,7 @@ fn main() {
     // Subscribe to contact_duration table to receive contact duration records on the client
     let _contact_sub = conn.subscription_builder()
         .on_error(|_ctx, err| eprintln!("Contact subscription error: {}", err))
-        .subscribe(vec!["SELECT * FROM contact_duration".to_string()]);
+        .subscribe(vec!["SELECT * FROM contact_event".to_string()]);
 
     // Default starting position when no position is found (will update after subscription)
     let mut current_position = (50.0, 50.0);

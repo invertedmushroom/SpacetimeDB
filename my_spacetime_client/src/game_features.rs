@@ -457,7 +457,7 @@ impl ChunkSubscriptionManager {
         
         // Check if we've moved to a new chunk
         if Some((cx, cy)) != self.current_chunk {
-            log::info!("Player moved to new chunk: ({}, {}) - requesting server-side subscription", cx, cy);
+            println!("Player moved to new chunk: ({}, {}) - requesting server-side subscription", cx, cy);
             // Immediately subscribe
             self.subscribe_to_chunk(cx, cy);
 

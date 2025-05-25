@@ -1,4 +1,4 @@
-use crate::physics::prelude::*;
+use crate::physics::rapier_common::*;
 use rapier3d::prelude::*;
 // Bounded channels for back-pressure - Using crossbeam::channel::bounded to limit event processing
 use crossbeam::channel::bounded;
@@ -12,6 +12,8 @@ use crate::physics::{drain_collision_events, apply_position_updates};
 /// Maximum number of collision events to process per tick
 pub const MAX_COLLISION_EVENTS: usize = 100;
 
+pub use crate::physics::PHYSICS_CONTEXTS;
+pub use crate::physics::PhysicsContext;
 /// Scheduled reducer for stepping physics each tick
 #[reducer]
 pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Result<(), String> {
@@ -82,7 +84,7 @@ pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Resu
         handle_event(ctx, contact);
     }
 
-    log::info!("Mock collision handling: {} collision events", events.len());
+    //log::info!("Mock collision handling: {} collision events", events.len());
     
     // Schedule the next tick (self-scheduling for continuous physics)
     if let Err(e) = crate::reducers::lifecycle::schedule_physics_tick(ctx, region, Some(schedule.scheduled_id)) {
