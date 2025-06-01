@@ -2,13 +2,12 @@ use spacetimedb::{Identity, ReducerContext, Table};
 //use crate::tables::player::player;
 use crate::tables::game_item::game_item;
 use crate::world::MapManager;
-use crate::spacetime_common::spatial::calculate_chunk;
+use crate::spacetime_common::spatial::{calculate_chunk_pair, are_chunks_adjacent_simd};
 use rapier3d::na::Point3;
 use crate::tables::physics_body::physics_body;
 use crate::physics::PHYSICS_CONTEXTS;
 use rapier3d::na::Isometry3;
-use crate::spacetime_common::spatial::are_chunks_adjacent;
-use crate::physics::rapier_common::*;
+use crate::physics::rapier_common::*;  // bring in IdentityRawExt for to_raw_u64()
 
 /**
  * Player movement reducer.
@@ -24,21 +23,15 @@ pub fn move_player(ctx: &ReducerContext, new_x: f32, new_y: f32) -> Result<(), S
         let player = player_physical_object.clone();
 
         // disallow moving further than adjacent chunks
-        {
-            let req_cx = calculate_chunk(new_x);
-            let req_cy = calculate_chunk(new_y);
-            let dx = (player.chunk_x - req_cx).abs();
-            let dy = (player.chunk_y - req_cy).abs();
-            if dx > 1 || dy > 1 {
-                return Err("Cannot move more than one chunk at a time".to_string());
-            }
+        let (new_chunk_x, new_chunk_y) = calculate_chunk_pair(new_x, new_y);
+        // adjacency helper
+        if !are_chunks_adjacent_simd(player.chunk_x, player.chunk_y, new_chunk_x, new_chunk_y) {
+            return Err("Cannot move more than one chunk at a time".to_string());
         }
-        
+    
         // Calculate new chunk coordinates
         let old_chunk_x = player.chunk_x;
         let old_chunk_y = player.chunk_y;
-        let new_chunk_x = calculate_chunk(new_x);
-        let new_chunk_y = calculate_chunk(new_y);
         
         // Check if player is moving to a new chunk
         let chunk_changed = new_chunk_x != old_chunk_x || new_chunk_y != old_chunk_y;
@@ -49,27 +42,16 @@ pub fn move_player(ctx: &ReducerContext, new_x: f32, new_y: f32) -> Result<(), S
             // Generate surrounding chunks to prevent "pop-in"
             MapManager::ensure_chunks_exist_in_radius(ctx, new_chunk_x, new_chunk_y, None)?;
         }
-        
+
         // Nov let the simulation update physics_body position
         log::info!("Physics_body with entity_id {} and owner_id {} will move to ({}, {}), on next physics tick", player.entity_id, player.owner_id, new_x, new_y);
         // Teleport the player's physics body via Rapier
         if let Some(phys) = ctx.db.physics_body().iter().find(|b| b.owner_id == player_id) {
             let mut contexts = PHYSICS_CONTEXTS.lock().unwrap();
             if let Some(world) = contexts.get_mut(&phys.region) {
-                // collect handles to avoid borrow conflicts
-                let handles: Vec<_> = world.bodies.iter()
-                    .filter_map(|(h, body)| {
-                        let raw_id = get_raw_id(body.user_data);
-                        if raw_id == phys.entity_id.to_raw_u64() {
-                            Some(h.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                // now teleport each matching body
-                for h in handles {
-                    if let Some(rb) = world.bodies.get_mut(h) {
+                // O(1) forward lookup via id_to_body map
+                if let Some(&handle) = world.id_to_body.get(&phys.entity_id.to_raw_u32()) {
+                    if let Some(rb) = world.bodies.get_mut(handle) {
                         rb.set_next_kinematic_position(Isometry3::translation(new_x, new_y, 0.0));
                         log::info!("Teleported physics body {} to ({}, {}), on next physics tick", phys.entity_id.to_hex(), new_x, new_y);
                     }
@@ -86,9 +68,6 @@ pub fn move_player(ctx: &ReducerContext, new_x: f32, new_y: f32) -> Result<(), S
 /**
  * Item pickup reducer.
  * Proximity-based interaction
- * 1. Spatial gameplay through distance calculations
- * 2. State transition from world item to inventory item
- * 3. Multi-condition validation (ownership, availability, distance)
  */
 #[spacetimedb::reducer]
 pub fn pickup_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
@@ -110,7 +89,9 @@ pub fn pickup_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
     let player_chunk = (player_physical_object.chunk_x, player_physical_object.chunk_y);
     if let (Some(item_cx), Some(item_cy)) = (item.chunk_x, item.chunk_y) {
         log::info!("Chunk pre-check: player_chunk={:?}, item_chunk=({}, {})", player_chunk, item_cx, item_cy);
-        if !are_chunks_adjacent(player_physical_object.chunk_x, player_physical_object.chunk_y, item_cx, item_cy) {
+        // let (dx, dy) = abs_diff_pair(player_physical_object.chunk_x, player_physical_object.chunk_y, item_cx, item_cy);
+        // if dx > 1 || dy > 1 {
+        if !are_chunks_adjacent_simd(player_physical_object.chunk_x, player_physical_object.chunk_y, item_cx, item_cy) {
             return Err("Item is too far away (not in adjacent chunks)".to_string());
         }
     } else {
@@ -152,11 +133,6 @@ pub fn pickup_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {
 
 /**
  * Item drop reducer.
- * 
- * Inventory management
- * 1. Ownership verification
- * 2. State transition from inventory to world item
- * 3. Position inheritance (item dropped at player's location)
  */
 #[spacetimedb::reducer]
 pub fn drop_item(ctx: &ReducerContext, item_id: u64) -> Result<(), String> {

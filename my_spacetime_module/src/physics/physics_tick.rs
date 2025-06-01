@@ -6,7 +6,7 @@ use crossbeam::channel::bounded;
 use spacetimedb::reducer;
 use spacetimedb::ReducerContext;
 use crate::tables::scheduling::PhysicsTickSchedule;
-use crate::physics::contact_tracker::{handle_event, collect_events};
+use crate::physics::contact_tracker::{handle_event, process_contacts};
 use crate::physics::{drain_collision_events, apply_position_updates};
 
 /// Maximum number of collision events to process per tick
@@ -43,6 +43,7 @@ pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Resu
             multibody_joints: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
             last_transforms: HashMap::new(),
+            id_to_body: HashMap::new(),
         }
     });
 
@@ -78,10 +79,10 @@ pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Resu
     }
 
     // Process contact-duration events
-    // Normalize raw collision events into domain contacts and handle them
-    let contacts = collect_events(&events, world, region);
+    // Process Start, Continue, and End contacts and handle events
+    let contacts = process_contacts(&events, world, region);
     for contact in contacts {
-        handle_event(ctx, contact);
+        handle_event(ctx, world, contact);
     }
 
     //log::info!("Mock collision handling: {} collision events", events.len());

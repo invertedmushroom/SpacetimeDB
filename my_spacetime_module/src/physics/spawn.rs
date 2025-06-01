@@ -27,8 +27,8 @@ pub fn spawn_rigid_body(
     }
 
     // Generate a unique ID for this physics entity via atomic counter
-    let phys_id_u64 = PHYSICS_ENTITY_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let physics_entity_id = PhysicsBodyId::from(Identity::from_u256((phys_id_u64 as u128).into()));
+    let phys_id_u32 = (PHYSICS_ENTITY_COUNTER.fetch_add(1, Ordering::Relaxed)) as u32;
+    let physics_entity_id = PhysicsBodyId::from(Identity::from_u256((phys_id_u32 as u128).into()));
     // Pack user data for the rigid body
     let object_function: u8 = 0; // Player on evrything for now since we use spawn_rigid_body at player creation
     let tick_count: u8 = 0; // The tick count is not used
@@ -37,7 +37,10 @@ pub fn spawn_rigid_body(
         body_type,
         object_function,
         flag,
-        raw_id: phys_id_u64,
+        raw_id: phys_id_u32,
+        modifier: 0, // No modifier for now
+        hit_count: 0, // No hits yet
+        block: false, // Not a block
         tick_count,
     };
     let packed_user_data = UserData::pack(data);
@@ -59,6 +62,7 @@ pub fn spawn_rigid_body(
             multibody_joints: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
             last_transforms: HashMap::new(),
+            id_to_body: HashMap::new(),
         }
     });
 
@@ -75,14 +79,19 @@ pub fn spawn_rigid_body(
     .translation(vector![x, y, z])
     .user_data(packed_user_data);
     let body_handle = world.bodies.insert(rb_builder.build());
-
+    // Track handle for O(1) forward lookup
+    world.id_to_body.insert(phys_id_u32, body_handle);
+    
     // Parse and build collider from shape string
     let is_sensor = collider_shape.to_lowercase().contains("sensor");
     let groups = collision::get_interaction_groups_for_body_type(body_type, is_sensor);
     let shape = collider_shape
         .parse::<ColliderShape>()
         .map_err(|e| e.to_string())?;
-    let col_builder = shape.to_rapier(is_sensor, groups);
+    // Build collider and pack user_data for option lookup
+    let mut col_builder = shape.to_rapier(is_sensor, groups);
+    // Mirror body user_data into the collider for contact tracking
+    col_builder = col_builder.user_data(packed_user_data);
     // Insert collider and tag it with the spawning skill ID (using ctx.sender temporarily)
     let collider_handle = world.colliders.insert_with_parent(col_builder.build(), body_handle, &mut world.bodies);
     // Map this collider handle back (here we use the player as default)
@@ -134,13 +143,10 @@ pub fn despawn_rigid_body(
     // Lock and get the physics context for this region
     let mut map = PHYSICS_CONTEXTS.lock().unwrap();
     if let Some(world) = map.get_mut(&region) {
-        // Find the body by comparing only its raw 64-bit ID (ignoring other packed bits)
-        let target_id = entity_id.to_raw_u64();
-        let handle_opt = world.bodies.iter()
-            .find(|(_, b)| get_raw_id(b.user_data) == target_id)
-            .map(|(h, _)| h);
-        if let Some(handle) = handle_opt {
-            // Now safely remove the body and its attached colliders
+        // O(1) lookup via id_to_body map
+        let target_id = entity_id.to_raw_u32();
+        if let Some(&handle) = world.id_to_body.get(&target_id) {
+            // Safely remove the body and attached colliders
             world.bodies.remove(
                 handle,
                 &mut world.islands,
@@ -149,8 +155,10 @@ pub fn despawn_rigid_body(
                 &mut world.multibody_joints,
                 true,
             );
+            // Remove forward lookup entry
+            world.id_to_body.remove(&target_id);
         }
-    }
+    } // close if-let
     // Delete from the PhysicsBody table
     ctx.db.physics_body().entity_id().delete(entity_id);
     Ok(())
