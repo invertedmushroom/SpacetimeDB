@@ -16,7 +16,8 @@ getrandom = { version = "0.3.2", default-features = false, features = ["wasm_js"
 log = "0.4"
 rand = "0.9.1"
 serde = { version = "1.0", features = ["derive"] }
-rapier3d = "0.25.1"
+rapier3d = { version = "0.25.1", features = [ "simd-stable" ] }
+wide = "0.7"
 once_cell = "1.17"
 crossbeam = "0.8.3"
 ethnum = "1.5.1"

@@ -1,3 +1,4 @@
+use crate::spacetime_common::spatial::calculate_chunk_pair;
 use crate::physics::rapier_common::*;
 use rapier3d::prelude::*;
 //use nalgebra::UnitQuaternion;
@@ -32,6 +33,8 @@ pub struct PhysicsContext {
     pub ccd_solver: CCDSolver,
     // Track last known transform to minimize DB updates per tick
     pub last_transforms: HashMap<RigidBodyHandle, (Vector<Real>, UnitQuaternion<Real>)>,
+    // Map raw 64-bit physics entity ID → RigidBodyHandle for O(1) forward lookup
+    pub id_to_body: HashMap<u32, RigidBodyHandle>,
 }
 
 pub static PHYSICS_CONTEXTS: Lazy<Mutex<HashMap<u32, PhysicsContext>>> =
@@ -56,6 +59,8 @@ fn apply_position_updates(ctx: &ReducerContext, world: &mut PhysicsContext) {
         // lookup last transform
         let entry = world.last_transforms.get(&handle);
         if entry.map_or(true, |(old_pos, old_rot)| *old_pos != pos || *old_rot != rot) {
+            // compute new chunk coordinates in XY plane
+            let (new_chunk_x, new_chunk_y) = calculate_chunk_pair(pos.x, pos.y);
             // transform changed: write back to DB
             let raw_id = get_raw_id(body.user_data);
             let pbid = raw_id.into_body_id();
@@ -63,9 +68,6 @@ fn apply_position_updates(ctx: &ReducerContext, world: &mut PhysicsContext) {
                 row.pos_x = pos.x;
                 row.pos_y = pos.y;
                 row.pos_z = pos.z;
-                // compute and assign new chunk coordinates in XY plane
-                let new_chunk_x = calculate_chunk(pos.x);
-                let new_chunk_y = calculate_chunk(pos.y);
                 row.chunk_x = new_chunk_x;
                 row.chunk_y = new_chunk_y;
                 row.rot_x = rot.i;
@@ -76,14 +78,14 @@ fn apply_position_updates(ctx: &ReducerContext, world: &mut PhysicsContext) {
                 ctx.db.physics_body().entity_id().update(row);
                 
                 // print debug info for chunks
-                log::info!("Called inside apply_position_updates {} moved to chunk ({}, {})", pbid.0.to_hex().chars().collect::<String>(), new_chunk_x, new_chunk_y);
+                //log::info!("Called inside apply_position_updates {} moved to chunk ({}, {})", pbid.0.to_hex().chars().collect::<String>(), new_chunk_x, new_chunk_y);
                 // record new transform
                 world.last_transforms.insert(handle, (pos, rot));
             }
-            log::info!("Updated physics body {} to position ({}, {}, {}) and rotation ({}, {}, {}, {}) via physics tick",
-                pbid.0.to_hex().chars().collect::<String>(),
-                pos.x, pos.y, pos.z,
-                rot.i, rot.j, rot.k, rot.w);
+            // log::info!("Updated physics body {} to position ({}, {}, {}) and rotation ({}, {}, {}, {}) via physics tick",
+            //     pbid.0.to_hex().chars().collect::<String>(),
+            //     pos.x, pos.y, pos.z,
+            //     rot.i, rot.j, rot.k, rot.w);
         }
     }
 }
