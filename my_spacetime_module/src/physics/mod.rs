@@ -11,6 +11,8 @@ pub mod contact_tracker;
 pub mod spawn;
 pub mod physics_tick;
 pub mod rapier_common;
+pub mod skills;
+
 
 // Forward old calls to the new spawn.rs
 pub use spawn::{spawn_rigid_body, despawn_rigid_body};
@@ -21,6 +23,9 @@ pub mod tests;
 /// Physics world state for a region
 pub struct PhysicsContext {
     pub pipeline: PhysicsPipeline,
+    pub query_pipeline: QueryPipeline,
+    /// Accumulated damage per entity raw_id for batched DB writes
+    pub pending_damage: HashMap<u32, u32>,
     pub gravity: Vector<Real>,
     pub integration_parameters: IntegrationParameters,
     pub islands: IslandManager,
@@ -33,8 +38,31 @@ pub struct PhysicsContext {
     pub ccd_solver: CCDSolver,
     // Track last known transform to minimize DB updates per tick
     pub last_transforms: HashMap<RigidBodyHandle, (Vector<Real>, UnitQuaternion<Real>)>,
-    // Map raw 64-bit physics entity ID → RigidBodyHandle for O(1) forward lookup
+    // Map raw 32-bit physics entity ID → RigidBodyHandle for O(1) forward lookup
     pub id_to_body: HashMap<u32, RigidBodyHandle>,
+
+}
+
+impl Default for PhysicsContext {
+    fn default() -> Self {
+        PhysicsContext {
+            pipeline: PhysicsPipeline::new(),
+            query_pipeline: QueryPipeline::new(),
+            pending_damage: HashMap::new(),
+            gravity: vector![0.0, -9.81, 0.0],
+            integration_parameters: IntegrationParameters::default(),
+            islands: IslandManager::new(),
+            broad_phase: BroadPhaseMultiSap::new(),
+            narrow_phase: NarrowPhase::new(),
+            bodies: RigidBodySet::new(),
+            colliders: ColliderSet::new(),
+            impulse_joints: ImpulseJointSet::new(),
+            multibody_joints: MultibodyJointSet::new(),
+            ccd_solver: CCDSolver::new(),
+            last_transforms: HashMap::new(),
+            id_to_body: HashMap::new(),
+        }
+    }
 }
 
 pub static PHYSICS_CONTEXTS: Lazy<Mutex<HashMap<u32, PhysicsContext>>> =
@@ -50,42 +78,70 @@ fn drain_collision_events(rx: &Receiver<rapier3d::geometry::CollisionEvent>) -> 
     events
 }
 
-// Apply updated positions, rotations, velocities, and chunk coords back to the DB
-fn apply_position_updates(ctx: &ReducerContext, world: &mut PhysicsContext) {
-    // Only update rows when transform changed since last tick
+fn apply_database_updates(ctx: &ReducerContext, world: &mut PhysicsContext) {
+    // collect all changed physics_body rows in one batch
+    let mut updates = Vec::with_capacity(world.bodies.len());
+
     for (handle, body) in world.bodies.iter() {
+        // skip static/fixed bodies
+        if body.is_fixed() {
+            continue;
+        }
+
+        // current transform
         let pos = *body.translation();
         let rot = *body.rotation();
-        // lookup last transform
-        let entry = world.last_transforms.get(&handle);
-        if entry.map_or(true, |(old_pos, old_rot)| *old_pos != pos || *old_rot != rot) {
-            // compute new chunk coordinates in XY plane
-            let (new_chunk_x, new_chunk_y) = calculate_chunk_pair(pos.x, pos.y);
-            // transform changed: write back to DB
-            let raw_id = get_raw_id(body.user_data);
-            let pbid = raw_id.into_body_id();
-            if let Some(mut row) = ctx.db.physics_body().entity_id().find(pbid) {
+
+        // did the transform change since last tick?
+        let transform_changed = world
+            .last_transforms
+            .get(&handle)
+            .map_or(true, |(old_pos, old_rot)| *old_pos != pos || *old_rot != rot);
+
+        // pull out accumulated damage (0 if none)
+        let entity_id = unpack_id(body.user_data);
+        let dmg = world.pending_damage.remove(&entity_id).unwrap_or(0);
+
+        // if nothing changed (neither movement nor damage), skip
+        if !transform_changed && dmg == 0 {
+            continue;
+        }
+
+        // lookup the DB row by PhysicsBodyId
+        if let Some(mut row) = ctx.db.physics_body().entity_id().find(entity_id) {
+            // update position/rotation/chunk if moved
+            if transform_changed {
+                let (chunk_x, chunk_y) = calculate_chunk_pair(pos.x, pos.y);
                 row.pos_x = pos.x;
                 row.pos_y = pos.y;
                 row.pos_z = pos.z;
-                row.chunk_x = new_chunk_x;
-                row.chunk_y = new_chunk_y;
+                row.chunk_x = chunk_x;
+                row.chunk_y = chunk_y;
                 row.rot_x = rot.i;
                 row.rot_y = rot.j;
                 row.rot_z = rot.k;
                 row.rot_w = rot.w;
-                // velocities and angular velocities unchanged here or update if needed
-                ctx.db.physics_body().entity_id().update(row);
-                
-                // print debug info for chunks
-                //log::info!("Called inside apply_position_updates {} moved to chunk ({}, {})", pbid.0.to_hex().chars().collect::<String>(), new_chunk_x, new_chunk_y);
                 // record new transform
                 world.last_transforms.insert(handle, (pos, rot));
             }
-            // log::info!("Updated physics body {} to position ({}, {}, {}) and rotation ({}, {}, {}, {}) via physics tick",
-            //     pbid.0.to_hex().chars().collect::<String>(),
-            //     pos.x, pos.y, pos.z,
-            //     rot.i, rot.j, rot.k, rot.w);
+
+            // apply damage if any
+            if dmg > 0 {
+                row.health = row.health.saturating_sub(dmg);
+            }
+
+            updates.push(row);
         }
     }
+
+    // write all changes in one go
+    if !updates.is_empty() {
+        for row in updates {
+           ctx.db.physics_body().entity_id().update(row);
+       }
+
+    }
+
+    // clear the pending damage map for the next tick
+    world.pending_damage.clear();
 }

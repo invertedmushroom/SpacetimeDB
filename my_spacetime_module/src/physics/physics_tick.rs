@@ -1,4 +1,3 @@
-use crate::physics::rapier_common::*;
 use rapier3d::prelude::*;
 // Bounded channels for back-pressure - Using crossbeam::channel::bounded to limit event processing
 use crossbeam::channel::bounded;
@@ -7,7 +6,7 @@ use spacetimedb::reducer;
 use spacetimedb::ReducerContext;
 use crate::tables::scheduling::PhysicsTickSchedule;
 use crate::physics::contact_tracker::{handle_event, process_contacts};
-use crate::physics::{drain_collision_events, apply_position_updates};
+use crate::physics::{drain_collision_events, apply_database_updates};
 
 /// Maximum number of collision events to process per tick
 pub const MAX_COLLISION_EVENTS: usize = 100;
@@ -23,29 +22,13 @@ pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Resu
     }
     
     let region = schedule.region;
-    //log::debug!("Physics tick running for region {}", region);
-    //log::debug!("Called at timestamp {}", ctx.timestamp);
     
     // lock and get or init context
     let mut map = PHYSICS_CONTEXTS.lock().unwrap();
-    let world = map.entry(region).or_insert_with(|| {
-        let gravity = vector![0.0, -9.81, 0.0];
-        PhysicsContext {
-            pipeline: PhysicsPipeline::new(),
-            gravity,
-            integration_parameters: IntegrationParameters::default(),
-            islands: IslandManager::new(),
-            broad_phase: BroadPhaseMultiSap::new(),
-            narrow_phase: NarrowPhase::new(),
-            bodies: RigidBodySet::new(),
-            colliders: ColliderSet::new(),
-            impulse_joints: ImpulseJointSet::new(),
-            multibody_joints: MultibodyJointSet::new(),
-            ccd_solver: CCDSolver::new(),
-            last_transforms: HashMap::new(),
-            id_to_body: HashMap::new(),
-        }
-    });
+    // construct a PhysicsContext for this region if it doesn't exist
+    let world = map.entry(region)
+                                        .or_default();
+                           
 
     // Use bounded channels to prevent event overflow - will drop events if channel fills up
     let (collision_tx, collision_rx) = bounded(MAX_COLLISION_EVENTS);
@@ -69,8 +52,8 @@ pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Resu
         &collector,
     );
 
-    // Update positions, rotations, velocities, and chunk coords in DB
-    apply_position_updates(ctx, world);
+    world.query_pipeline.update(&world.colliders);
+
 
     // Drain collision events and warn if at capacity
     let events = drain_collision_events(&collision_rx);
@@ -85,7 +68,7 @@ pub fn physics_tick(ctx: &ReducerContext, schedule: PhysicsTickSchedule) -> Resu
         handle_event(ctx, world, contact);
     }
 
-    //log::info!("Mock collision handling: {} collision events", events.len());
+    apply_database_updates(ctx, world);
     
     // Schedule the next tick (self-scheduling for continuous physics)
     if let Err(e) = crate::reducers::lifecycle::schedule_physics_tick(ctx, region, Some(schedule.scheduled_id)) {

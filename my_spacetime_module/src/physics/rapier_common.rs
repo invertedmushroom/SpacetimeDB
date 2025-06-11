@@ -1,6 +1,6 @@
 //! Common imports for physics modules
 pub use crate::spacetime_common::types::PhysicsBodyId;
-pub use crate::spacetime_common::spatial::calculate_chunk;
+pub use crate::spacetime_common::spatial::{ calculate_chunk, calculate_chunk_pair };
 pub use crate::spacetime_common::collision;
 pub use crate::spacetime_common::types::*;
 
@@ -83,10 +83,10 @@ pub struct UserData {
     pub body_type: u8,
     pub object_function: u8,
     pub flag: bool,
-    pub raw_id: u32,      // changed from u64 to u32
-    pub hit_count: u8,    // new field
-    pub modifier: u8,     // new field
-    pub block: bool,      // new field
+    pub raw_id: u32,      
+    pub hit_count: u8,    
+    pub modifier: u8,     
+    pub block: bool,      
     pub tick_count: u8,
 }
 
@@ -138,13 +138,13 @@ pub fn get_flag(data: u128) -> bool {
 pub fn set_flag(data: u128, flag: bool) -> u128 {
     (data & !(1u128 << FLAG_SHIFT)) | ((flag as u8 as u128) << FLAG_SHIFT)
 }
-/// Extract raw physics entity ID (32 bits) from packed user_data
+/// Extract physics entity ID (32 bits) from packed user_data
 #[inline]
-pub fn get_raw_id(data: u128) -> u32 {
+pub fn unpack_id(data: u128) -> u32 {
     ((data >> RAW_ID_SHIFT) & ((1u128 << 32) - 1)) as u32
 }
 /// Pack a 32-bit physics entity ID into Rapier user_data
-pub fn pack_raw_id(raw_id: u32) -> u128 {
+pub fn pack_id(raw_id: u32) -> u128 {
     (u128::from(raw_id) & ((1u128 << 32) - 1)) << RAW_ID_SHIFT
 }
 /// Extract hit_count (8 bits) from packed user_data

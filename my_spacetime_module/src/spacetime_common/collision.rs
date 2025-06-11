@@ -9,42 +9,32 @@ pub const KINEMATIC_BODY_TYPE: u8 = 2;
 pub const PROJECTILE_BODY_TYPE: u8 = 10;
 pub const PLAYER_BODY_TYPE: u8 = 20;
 
-/// Collision categories via bitmasks
-enum CollisionCategory {
-    Default,
-    Player,
-    Enemy,
-    Projectile,
-    Sensor,
+/// Bitmask groups for your game (up to 32 distinct groups)
+pub mod collision_group {
+    pub const DEFAULT:    u32 = 1 << 0;
+    pub const PLAYER:     u32 = 1 << 1;
+    pub const ENEMY:      u32 = 1 << 2;
+    pub const PROJECTILE: u32 = 1 << 3;
+    pub const SENSOR:     u32 = 1 << 4;
+
+    /// Which groups solid bodies collide with
+    pub const SOLID_FILTER:  u32 = DEFAULT | PLAYER | ENEMY | PROJECTILE;
+    /// Which groups sensors “see”
+    pub const SENSOR_FILTER: u32 = SOLID_FILTER;
 }
 
-impl CollisionCategory {
-    pub fn mask(self) -> u32 {
-        match self {
-            CollisionCategory::Default => 0b0001,
-            CollisionCategory::Player => 0b0010,
-            CollisionCategory::Enemy => 0b0100,
-            CollisionCategory::Projectile => 0b1000,
-            CollisionCategory::Sensor => 0b0000,
-        }
-    }
-}
-
-/// Returns the interaction groups for a given body type
-pub fn get_interaction_groups_for_body_type(body_type: u8, is_sensor: bool) -> InteractionGroups {
-    let category = match body_type {
-        PLAYER_BODY_TYPE => CollisionCategory::Player,
-        PROJECTILE_BODY_TYPE => CollisionCategory::Projectile,
-        _ => CollisionCategory::Default,
+/// Build the two‐mask InteractionGroups for Rapier
+#[inline]
+pub fn interaction_groups(body_type: u8, is_sensor: bool) -> InteractionGroups {
+    let membership = match body_type {
+        PLAYER_BODY_TYPE     => collision_group::PLAYER,
+        PROJECTILE_BODY_TYPE => collision_group::PROJECTILE,
+        _                    => collision_group::DEFAULT,
     };
-    let membership = category.mask();
     let filter = if is_sensor {
-        CollisionCategory::Sensor.mask()
+        collision_group::SENSOR_FILTER
     } else {
-        CollisionCategory::Default.mask()
-            | CollisionCategory::Player.mask()
-            | CollisionCategory::Enemy.mask()
-            | CollisionCategory::Projectile.mask()
+        collision_group::SOLID_FILTER
     };
     InteractionGroups::new(membership.into(), filter.into())
 }

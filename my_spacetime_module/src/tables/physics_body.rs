@@ -8,7 +8,7 @@ use spacetimedb::Identity;
 #[derive(Clone)]
 pub struct PhysicsBody {
     #[primary_key]
-    pub entity_id: Identity,
+    pub entity_id: u32,  // Same as phy_entity_id in Player table and 32 bits of Rapier's user_data
     pub owner_id: Identity,
     pub health: u32,
     #[index(btree)]  // index on region for fast region-based queries

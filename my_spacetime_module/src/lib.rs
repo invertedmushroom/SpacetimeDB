@@ -18,6 +18,10 @@ pub mod tables {
     pub mod scheduling;
     pub mod contact_event;
     pub mod map_chunk;
+    pub mod skill_cooldown;
+    pub mod player_buffs;
+    pub mod damage_event;
+    pub mod buff_expiry_schedule;
 }
 pub mod reducers {
     pub mod combat;
@@ -39,6 +43,6 @@ pub use tables::contact_event::ContactEvent;
 pub use reducers::lifecycle::{module_init, on_client_connected, on_client_disconnected};
 pub use reducers::world::{move_player, pickup_item, drop_item};
 // Chunk subscription request reducer
-pub use reducers::combat::{combat_melee, combat_aoe};
+pub use reducers::combat::{_combat_melee, _combat_aoe};
 
 pub mod rls;

@@ -34,5 +34,5 @@ pub struct Player {
     pub score: u32,
     pub status: PlayerStatus, // Current connection/gameplay state
     pub last_active: Timestamp, // Last activity timestamp for timeout logic
-    pub phy_entity_id: Identity, // ID of the associated physics body (primary key) - not used anywhere
+    pub phy_entity_id: u32, // ID of the associated physics body (primary key)
 }

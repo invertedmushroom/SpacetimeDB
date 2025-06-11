@@ -1,15 +1,33 @@
 use crate::physics::rapier_common::*;
 use rapier3d::prelude::*;
-use spacetimedb::{reducer, ReducerContext, Identity, Table};
+use spacetimedb::{reducer, ReducerContext, Table};
 use crate::tables::physics_body::physics_body;
-use crate::physics::contact_tracker::register_option;
+use crate::physics::contact_tracker::register_owner;
 use crate::spacetime_common::shape::ColliderShape;
+use crate::spacetime_common::collision::*;
 
 pub use crate::physics::PHYSICS_CONTEXTS;
 pub use crate::physics::PhysicsContext;
 
 // Unique physics-entity ID counter
 static PHYSICS_ENTITY_COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(1));
+
+/// Build the Rapier RigidBodyBuilder for a given type & user_data
+fn make_rb_builder(body_type: u8, x: f32, y: f32, z: f32, ud: u128) -> RigidBodyBuilder {
+    let b = match body_type {
+        STATIC_BODY_TYPE     => RigidBodyBuilder::fixed(),
+        DYNAMIC_BODY_TYPE    => RigidBodyBuilder::dynamic(),
+        KINEMATIC_BODY_TYPE  => RigidBodyBuilder::kinematic_position_based(),
+        PROJECTILE_BODY_TYPE => RigidBodyBuilder::dynamic().ccd_enabled(true),
+        PLAYER_BODY_TYPE     => RigidBodyBuilder::kinematic_position_based(),
+        _ => unreachable!(),
+    };
+    b.translation(vector![x, y, z]).user_data(ud)
+}
+
+fn is_sensor_string(shape: &str) -> bool {
+    shape.to_lowercase().contains("sensor")
+}
 
 #[reducer]
 pub fn spawn_rigid_body(
@@ -27,8 +45,7 @@ pub fn spawn_rigid_body(
     }
 
     // Generate a unique ID for this physics entity via atomic counter
-    let phys_id_u32 = (PHYSICS_ENTITY_COUNTER.fetch_add(1, Ordering::Relaxed)) as u32;
-    let physics_entity_id = PhysicsBodyId::from(Identity::from_u256((phys_id_u32 as u128).into()));
+    let entity_id = (PHYSICS_ENTITY_COUNTER.fetch_add(1, Ordering::Relaxed)) as u32;
     // Pack user data for the rigid body
     let object_function: u8 = 0; // Player on evrything for now since we use spawn_rigid_body at player creation
     let tick_count: u8 = 0; // The tick count is not used
@@ -37,7 +54,7 @@ pub fn spawn_rigid_body(
         body_type,
         object_function,
         flag,
-        raw_id: phys_id_u32,
+        raw_id: entity_id,
         modifier: 0, // No modifier for now
         hit_count: 0, // No hits yet
         block: false, // Not a block
@@ -47,63 +64,36 @@ pub fn spawn_rigid_body(
 
     // Initialize or get the physics world for this region
     let mut map = PHYSICS_CONTEXTS.lock().unwrap();
-    let world = map.entry(region).or_insert_with(|| {
-        let gravity = vector![0.0, -9.81, 0.0];
-        PhysicsContext {
-            pipeline: PhysicsPipeline::new(),
-            gravity,
-            integration_parameters: IntegrationParameters::default(),
-            islands: IslandManager::new(),
-            broad_phase: BroadPhaseMultiSap::new(),
-            narrow_phase: NarrowPhase::new(),
-            bodies: RigidBodySet::new(),
-            colliders: ColliderSet::new(),
-            impulse_joints: ImpulseJointSet::new(),
-            multibody_joints: MultibodyJointSet::new(),
-            ccd_solver: CCDSolver::new(),
-            last_transforms: HashMap::new(),
-            id_to_body: HashMap::new(),
-        }
-    });
+    let world = map.entry(region)
+                                        .or_default();
 
+    let rb = make_rb_builder(body_type, x, y, z, packed_user_data).build();
     // Build and insert rigid body
-    let rb_builder = match body_type {
-        0 => RigidBodyBuilder::fixed(),
-        1 => RigidBodyBuilder::dynamic(),
-        2 => RigidBodyBuilder::kinematic_position_based(),
-        10 => RigidBodyBuilder::dynamic()
-            .ccd_enabled(true), // Enable CCD for projectiles
-        20 => RigidBodyBuilder::kinematic_position_based(), // Player type (kinematic for client-controlled movement)
-        _ => return Err("Invalid body type".into()),
-    }
-    .translation(vector![x, y, z])
-    .user_data(packed_user_data);
-    let body_handle = world.bodies.insert(rb_builder.build());
+    let body_handle = world.bodies.insert(rb);
     // Track handle for O(1) forward lookup
-    world.id_to_body.insert(phys_id_u32, body_handle);
+    world.id_to_body.insert(entity_id, body_handle);
     
     // Parse and build collider from shape string
-    let is_sensor = collider_shape.to_lowercase().contains("sensor");
-    let groups = collision::get_interaction_groups_for_body_type(body_type, is_sensor);
+    let sensor = is_sensor_string(&collider_shape);
+    let groups = interaction_groups(body_type, sensor);
     let shape = collider_shape
         .parse::<ColliderShape>()
         .map_err(|e| e.to_string())?;
-    // Build collider and pack user_data for option lookup
-    let mut col_builder = shape.to_rapier(is_sensor, groups);
-    // Mirror body user_data into the collider for contact tracking
-    col_builder = col_builder.user_data(packed_user_data);
-    // Insert collider and tag it with the spawning skill ID (using ctx.sender temporarily)
-    let collider_handle = world.colliders.insert_with_parent(col_builder.build(), body_handle, &mut world.bodies);
-    // Map this collider handle back (here we use the player as default)
-    register_option(collider_handle, ctx.sender);
+    // Build collider and pack user_data
+    let col = shape.to_rapier(sensor, groups)
+        .user_data(packed_user_data)
+        .build();
+    // Insert collider into the physics world
+    let col_handle = world.colliders.insert_with_parent(col, body_handle, &mut world.bodies);
+    // tag the collider with client Identity for ownership tracking
+    register_owner(col_handle, ctx.sender);
 
     // Calculate chunk coordinates for spatial partitioning
-    let chunk_x = calculate_chunk(x);
-    let chunk_y = calculate_chunk(y);
+    let (chunk_x, chunk_y) = calculate_chunk_pair(x, y);
 
     // Insert row into physics_body
     let phys = crate::tables::physics_body::PhysicsBody {
-        entity_id: physics_entity_id.0,
+        entity_id: entity_id,
         owner_id: ctx.sender,
         health: 100,
         region,
@@ -128,7 +118,7 @@ pub fn spawn_rigid_body(
     ctx.db.physics_body().insert(phys);
 
     log::info!("Physics object created: entity_id={}, shape={}, type={}", 
-        physics_entity_id.0.to_hex().chars().collect::<String>(),
+        entity_id,
         collider_shape, body_type);
     Ok(())
 }
@@ -137,15 +127,14 @@ pub fn spawn_rigid_body(
 /// Remove a rigid body and its collider from the physics world and delete its DB entry
 pub fn despawn_rigid_body(
     ctx: &ReducerContext,
-    entity_id: Identity,
+    entity_id: u32,
     region: u32,
 ) -> Result<(), String> {
     // Lock and get the physics context for this region
     let mut map = PHYSICS_CONTEXTS.lock().unwrap();
     if let Some(world) = map.get_mut(&region) {
         // O(1) lookup via id_to_body map
-        let target_id = entity_id.to_raw_u32();
-        if let Some(&handle) = world.id_to_body.get(&target_id) {
+        if let Some(&handle) = world.id_to_body.get(&entity_id) {
             // Safely remove the body and attached colliders
             world.bodies.remove(
                 handle,
@@ -156,9 +145,9 @@ pub fn despawn_rigid_body(
                 true,
             );
             // Remove forward lookup entry
-            world.id_to_body.remove(&target_id);
+            world.id_to_body.remove(&entity_id);
         }
-    } // close if-let
+    }
     // Delete from the PhysicsBody table
     ctx.db.physics_body().entity_id().delete(entity_id);
     Ok(())

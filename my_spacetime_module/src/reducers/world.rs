@@ -7,7 +7,6 @@ use rapier3d::na::Point3;
 use crate::tables::physics_body::physics_body;
 use crate::physics::PHYSICS_CONTEXTS;
 use rapier3d::na::Isometry3;
-use crate::physics::rapier_common::*;  // bring in IdentityRawExt for to_raw_u64()
 
 /**
  * Player movement reducer.
@@ -50,10 +49,10 @@ pub fn move_player(ctx: &ReducerContext, new_x: f32, new_y: f32) -> Result<(), S
             let mut contexts = PHYSICS_CONTEXTS.lock().unwrap();
             if let Some(world) = contexts.get_mut(&phys.region) {
                 // O(1) forward lookup via id_to_body map
-                if let Some(&handle) = world.id_to_body.get(&phys.entity_id.to_raw_u32()) {
+                if let Some(&handle) = world.id_to_body.get(&phys.entity_id) {
                     if let Some(rb) = world.bodies.get_mut(handle) {
                         rb.set_next_kinematic_position(Isometry3::translation(new_x, new_y, 0.0));
-                        log::info!("Teleported physics body {} to ({}, {}), on next physics tick", phys.entity_id.to_hex(), new_x, new_y);
+                        log::info!("Teleported physics body {} to ({}, {}), on next physics tick", phys.entity_id, new_x, new_y);
                     }
                 }
             }

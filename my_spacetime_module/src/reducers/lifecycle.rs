@@ -1,4 +1,6 @@
-use spacetimedb::{Identity, ReducerContext, Timestamp, ScheduleAt, Table};
+use spacetimedb::{Identity, ReducerContext, Timestamp, ScheduleAt, Table, TimeDuration};
+use spacetimedb::reducer;
+use crate::tables::player_buffs::player_buffs;
 use crate::tables::physics_body::physics_body;
 use crate::tables::player::{Player, PlayerStatus};
 use crate::tables::scheduling::PhysicsTickSchedule;
@@ -9,6 +11,9 @@ use crate::tables::scheduling::physics_tick_schedule;
 use crate::tables::player::player;
 use crate::spacetime_common::spatial::calculate_chunk;
 use crate::spacetime_common::collision::STATIC_BODY_TYPE;
+use crate::tables::buff_expiry_schedule::BuffExpirySchedule;
+use crate::tables::buff_expiry_schedule::buff_expiry_schedule;
+use crate::tables::damage_event::damage_event;
 /**
  * Initialization reducer called when the module is first published.
  * 
@@ -52,7 +57,13 @@ pub fn module_init(ctx: &ReducerContext) -> Result<(), String> {
         format!("Box({}, {}, {})", 1000, 0.1, 1000),
         STATIC_BODY_TYPE,
     )?;
-   
+
+    // Schedule buff expiry every second
+    ctx.db.buff_expiry_schedule().insert(BuffExpirySchedule {
+        scheduled_id: 0,
+        scheduled_at: TimeDuration::from_micros(1000).into(),
+    });
+    
     Ok(())
 }
 
@@ -167,10 +178,6 @@ pub fn on_client_connected(ctx: &ReducerContext) -> Result<(), String> {
         ctx.db.player().insert(new_player.clone());
         log::info!("Created new player: {}", new_player.username);
 
-        // Removed position and chunk fileds from player table
-        // move_player reducer uses ctx.sender to match physics_body table to update on move
-        // ensure spawn_rigid_body has correct owner_id as that is what will be used to match in other parts
-
         // Initialize chunk subscription bounds for this client
         new_player
     } else if let Some(mut player) = existing_player {
@@ -211,6 +218,49 @@ pub fn on_client_disconnected(ctx: &ReducerContext) -> Result<(), String> {
         
         log::info!("Player {} is now offline", player.username);
     }
+    
+    Ok(())
+}
+
+
+// Scheduled reducer to purge expired buffs every tick
+#[reducer]
+pub fn expire_buffs(ctx: &ReducerContext, _sch: BuffExpirySchedule) -> Result<(), String> {
+    let now = ctx.timestamp;
+    
+    // Find and collect all expired buffs first
+    let expired_buffs: Vec<_> = ctx.db
+        .player_buffs()
+        .iter()
+        .filter(|buff| buff.expires_at < now)
+        .collect();
+    
+    // Then delete each one
+    for buff in expired_buffs {
+        ctx.db.player_buffs().id().delete(buff.id);
+    }
+
+    // Purge expired damage_events so clients have time to fetch
+    let expired_events: Vec<_> = ctx.db
+        .damage_event()
+        .iter()
+        .filter(|ev| ev.expire_at < now)
+        .collect();
+    for ev in expired_events {
+        ctx.db.damage_event().event_id().delete(ev.event_id);
+    }
+
+    // Schedule the next buff expiry (self-scheduling for continuous expiration)
+    let next_id = _sch.scheduled_id + 1;
+    let base_time = if let ScheduleAt::Time(ts) = _sch.scheduled_at { ts } else { ctx.timestamp };
+    let next_time = Timestamp::from_micros_since_unix_epoch(
+        base_time.to_micros_since_unix_epoch() + 1_000_000 // 1 second interval
+    );
+    let schedule = BuffExpirySchedule {
+        scheduled_id: next_id,
+        scheduled_at: ScheduleAt::Time(next_time),
+    };
+    ctx.db.buff_expiry_schedule().insert(schedule);
     
     Ok(())
 }
